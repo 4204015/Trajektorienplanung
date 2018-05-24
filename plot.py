@@ -61,11 +61,16 @@ class PlotterLLM:
                             xytext=(-4,5), textcoords='offset points')
     
     def report(self, ax):
-        m ,s = divmod(self.llm.training_duration, 60)
-        ax.set_title(f"Bericht\nTrainingszeit: {m}:{s:.2f} | "
-                     + "$rmse_{min}$=" + f"{np.min(self.llm.global_loss):.6e}")
+        
+        # linear regression
+        grad = 2 * self.llm.training_duration * 1000 / (self.llm.M_ + 1)**2
+                
+        m, s = divmod(self.llm.training_duration, 60)
+        ax.set_title(f"Bericht\nTrainingszeit: {int(m)}:{s:.2f} | "
+                     + "$rmse_{min}$=" + f"{np.min(self.llm.global_loss):.6e}"
+                     + r" | $\bar{t}_{grad} =$" + f"{grad:.4f}")
         ax.grid(True)
-        ax.plot(range(1, self.llm.M_), self.llm.global_loss/np.max(self.llm.global_loss),
+        ax.plot(range(1, self.llm.M_ + 1), self.llm.global_loss/np.max(self.llm.global_loss),
                 color=self.standard_colors[0], label="rmse")
         ax.set_ylabel("Nomierter RMSE")
         ax.set_xlabel("Anzahl Teilmodelle")
@@ -140,7 +145,7 @@ class PlotterLLM:
         self.fig.set_size_inches((9, len(self.options)*2.5))
         for idx, option in enumerate(self.options):
             self.axes[idx].cla()
-            if not self.projection_3d:
+            if self.N < 2:
                 getattr(self, option)(self.axes[idx])
             else:
                 getattr(self, option + "3D")(self.axes[idx])
@@ -151,14 +156,18 @@ class PlotterLLM:
         self.y = y
         self.llm = llm
         
-        self.projection_3d = isinstance(u, list)
-        if not self.projection_3d:
+        self.N = 1 if not isinstance(u, list) else len(u)
+        
+        if self.N == 1:
             self.y_pred = np.reshape(llm.predict(u), (len(u), 1))
-        else:
-            X = np.vstack((u[0].flatten(), u[1].flatten())).T
+        elif self.N == 2:
+            X = np.vstack((u_i.flatten() for u_i in u)).T
             k = u[0].shape[0]
             self.y_pred = np.reshape(llm.predict(X), (k, k))
             self.y = np.reshape(y, (k, k))
+        else:
+            self.options = ["report"]
+            
             
         # define colors for each model
         self.standard_colors = plt.get_cmap('plasma')(np.linspace(0, 0.9, 4))
