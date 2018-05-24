@@ -1,9 +1,8 @@
 import time
-import itertools
 import tqdm
 import numpy as np
+import numexpr as ne
 import scipy as sp
-import numba as nb
 from copy import deepcopy
 from sklearn.base import BaseEstimator, RegressorMixin
 from sklearn.utils.validation import check_X_y, check_array, check_is_fitted
@@ -33,7 +32,7 @@ class LolimotRegressor(BaseEstimator, RegressorMixin):
         Range of values for each input dimension N for which the model should be trained.
     """
 
-    def __init__(self, sigma=0.4, smoothing='proportional', p=1/3, model_complexity=10, x_range=None):
+    def __init__(self, sigma=0.4, smoothing='proportional', p=1/3, model_complexity=10, x_range=None, notebook=True):
 
         # TODO: move parameter validation to 'fit' (scikit api)
         if x_range:
@@ -49,6 +48,7 @@ class LolimotRegressor(BaseEstimator, RegressorMixin):
 
         self.smoothing = smoothing
         self.p = p
+        self.notebook = notebook
 
         self.M_ = None          # Number of models
         self.model_range = []   # M x N
@@ -77,19 +77,23 @@ class LolimotRegressor(BaseEstimator, RegressorMixin):
             Q_m = sp.sparse.spdiags(self.A[m, :], 0, self.A[m, :].size, self.A[m, :].size)
             X_reg = np.hstack((np.ones((self.k, 1)), self.X))  # regression matrix
             try:
-                Theta[i, :] = (np.linalg.inv(X_reg.T @ Q_m @ X_reg) @ X_reg.T @ Q_m @ self.y).flatten()
+                Theta[i, :] = np.linalg.lstsq(Q_m @ X_reg, self.y @ Q_m, rcond=None)[0].flatten()
+                
+                # old (explicit) implementation:
+                #Theta[i, :] = (np.linalg.inv(X_reg.T @ Q_m @ X_reg) @ X_reg.T @ Q_m @ self.y).flatten()
             except np.linalg.LinAlgError as err:
-                print(f"[ERROR]: M={self.M_}")
+                print(f"[WARNING]: Traning was aborted because of singular matrix with M={self.M_}")
                 raise
         return Theta
     
     def _update_validity_functions(self):
-        C = (self.X[np.newaxis, :, :] - self.Xi.T[:, np.newaxis, :]) ** 2 / (self.Sigma.T[:, np.newaxis, :] ** 2)
-        mu = np.exp(-0.5 * np.sum(C, axis=2))  # summation along N-axis -> Mxk
-        mu_sum = np.sum(mu, axis=0)  # summation along M-axis -> k
-        self.A = mu / mu_sum
-        #assert np.all(np.abs(np.sum(self.A, axis=0) - 1) < 10 ** -10)
-      
+        c = np.zeros((self.M_, self.k))
+        for m in range (self.M_):
+            np.sum((self.X - self.Xi.T[m, :]) ** 2 / (self.Sigma.T[m, :] ** 2), out=c[m, :], axis=1)
+        mu = ne.evaluate('exp(-0.5 * c)')
+        mu_sum = np.sum(mu, axis=0) # summation along M-axis -> k
+        np.divide(mu, mu_sum, out=self.A) 
+        
     def _increase_model_complexity(self, increment=1):
         for _ in range(increment):
             self.M_ += 1
@@ -125,7 +129,7 @@ class LolimotRegressor(BaseEstimator, RegressorMixin):
     def _get_global_loss(self):
         return np.sum((self.y - self._get_model_output(self.X)) ** 2)
     
-    def _split_along(self, j, l, m, final=False):
+    def _split_along(self, j, l, m):
         # (a) ... split component model along j in two halves
         self.model_range[m] = deepcopy(self.model_range[l])
         r = self.model_range[l][j]
@@ -152,12 +156,17 @@ class LolimotRegressor(BaseEstimator, RegressorMixin):
 
         self.Xi[:, 0] = [np.mean(r) for r in self.x_range]
         self.Sigma[:, 0] = self._get_sigma(self.x_range)
+        self.A = np.zeros((self.M_, self.k))
         self._update_validity_functions()
         self.Theta = self._get_theta((0,))
         self.model_range.append(self.x_range)
+        self.global_loss.append(self._get_global_loss())
         
         tqdm.tqdm.monitor_interval = 0 # disable the monitor thread because bug in tqdm #481
-        pbar = tqdm.tqdm_notebook(total=self.model_complexity) # _tqdm_notebook
+        if self.notebook:
+            pbar = tqdm.tqdm_notebook(total=self.model_complexity) # _tqdm_notebook
+        else:
+            pbar = tqdm.tqdm(total=self.model_complexity) # _tqdm_notebook
         pbar.update(1)
         while self.M_ < self.model_complexity:
             start_time = time.time()
@@ -168,29 +177,33 @@ class LolimotRegressor(BaseEstimator, RegressorMixin):
 
             L_global = np.zeros(self.N)  # global model loss for every split attempt
             self._save_params()
-
-            # 3. for every input dimension ...
-            for j in range(self.N):
+            
+            try:
+                # 3. for every input dimension ...
+                for j in range(self.N):
+                    self._split_along(j, l, m)
+    
+                    # (d) ... calculate the tree's output error
+                    L_global[j] = self._get_global_loss()
+    
+                    # Undo changes 'from _split_along'
+                    self._recover_params()
+    
+                # 4. find best division (split) and apply
+                j = np.argmin(L_global)
+                self.global_loss.append(L_global[j])
                 self._split_along(j, l, m)
-
-                # (d) ... calculate the tree's output error
-                L_global[j] = self._get_global_loss()
-
-                # Undo changes 'from _split_along'
-                self._recover_params()
-
-            # 4. find best division (split) and apply
-            j = np.argmin(L_global)
-            self.global_loss.append(L_global[j])
-            self._split_along(j, l, m, True)
-            self.split_duration.append(time.time() - start_time)
-            pbar.update(1)
+                self.split_duration.append(time.time() - start_time)
+                pbar.update(1)
+            except np.linalg.LinAlgError:
+                self.M_ -= 1  
+                break  
         pbar.close()
         
     def _get_model_output(self, u):
         U = np.hstack((np.ones((self.k, 1)), u)).T
         y_hat = np.sum((self.Theta @ U) * self.A, axis=0)
-        return y_hat  # np.reshape(y_hat, (u.shape[0], 1))
+        return y_hat
 
     # --- public functions ---
 
@@ -233,6 +246,7 @@ class LolimotRegressor(BaseEstimator, RegressorMixin):
 
         self.X = X
         self.k = X.shape[0]
+        self.A = np.zeros((self.M_, self.k))
         self._update_validity_functions()
         return self._get_model_output(X)
 
