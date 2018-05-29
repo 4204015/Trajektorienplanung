@@ -3,6 +3,7 @@ import tqdm
 import numpy as np
 import numexpr as ne
 import scipy as sp
+import scipy.sparse as sps
 from copy import deepcopy
 from sklearn.base import BaseEstimator, RegressorMixin
 from sklearn.utils.validation import check_X_y, check_array, check_is_fitted
@@ -28,17 +29,18 @@ class LolimotRegressor(BaseEstimator, RegressorMixin):
     model_complexity : int, default: 10
         Maximum number of local models.
 
-    x_range : list of tuples, optional, default: []
+    input_range : list of tuples, optional, default: []
         Range of values for each input dimension N for which the model should be trained.
     """
 
-    def __init__(self, sigma=0.4, smoothing='proportional', p=1/3, model_complexity=10, x_range=None, notebook=True):
+    def __init__(self, sigma=0.4, smoothing='proportional', p=1/3,
+                 model_complexity=10, input_range=None, notebook=True):
 
         # TODO: move parameter validation to 'fit' (scikit api)
-        if x_range:
-            assert isinstance(x_range, list), "'x_range' has to be a list of range tuples."
-            self.N = len(x_range)
-            self.x_range = x_range
+        if input_range:
+            assert isinstance(input_range, list), "'input_range' has to be a list of range tuples."
+            self.N = len(input_range)
+            self.x_range = input_range
         else:
             self.x_range = []
             self.N = None
@@ -73,25 +75,21 @@ class LolimotRegressor(BaseEstimator, RegressorMixin):
             num_model = len(model_pointers)
         Theta = np.zeros((num_model, self.N + 1))
         for i, m in enumerate(model_pointers):  # for model m
-            #Q_m = np.diag(self.A[m, :])  # weight matrix Q
-            Q_m = sp.sparse.spdiags(self.A[m, :], 0, self.A[m, :].size, self.A[m, :].size)
+            Q_m = sps.spdiags(self.A[m, :], 0, self.A[m, :].size, self.A[m, :].size)
             X_reg = np.hstack((np.ones((self.k, 1)), self.X))  # regression matrix
             try:
                 Theta[i, :] = np.linalg.lstsq(Q_m @ X_reg, self.y @ Q_m, rcond=None)[0].flatten()
-                
-                # old (explicit) implementation:
-                #Theta[i, :] = (np.linalg.inv(X_reg.T @ Q_m @ X_reg) @ X_reg.T @ Q_m @ self.y).flatten()
-            except np.linalg.LinAlgError as err:
+            except np.linalg.LinAlgError:
                 print(f"[WARNING]: Training was aborted because of singular matrix with M={self.M_}")
                 raise
         return Theta
     
     def _update_validity_functions(self):
         c = np.zeros((self.M_, self.k))
-        for m in range (self.M_):
+        for m in range(self.M_):
             np.sum((self.X - self.Xi.T[m, :]) ** 2 / (self.Sigma.T[m, :] ** 2), out=c[m, :], axis=1)
         mu = ne.evaluate('exp(-0.5 * c)')
-        mu_sum = np.sum(mu, axis=0) # summation along M-axis -> k
+        mu_sum = np.sum(mu, axis=0)  # summation along M-axis -> k
         np.divide(mu, mu_sum, out=self.A) 
         
     def _increase_model_complexity(self, increment=1):
@@ -162,11 +160,11 @@ class LolimotRegressor(BaseEstimator, RegressorMixin):
         self.model_range.append(self.x_range)
         self.global_loss.append(self._get_global_loss())
         
-        tqdm.tqdm.monitor_interval = 0 # disable the monitor thread because bug in tqdm #481
+        tqdm.tqdm.monitor_interval = 0  # disable the monitor thread because bug in tqdm #481
         if self.notebook:
-            pbar = tqdm.tqdm_notebook(total=self.model_complexity) # _tqdm_notebook
+            pbar = tqdm.tqdm_notebook(total=self.model_complexity)
         else:
-            pbar = tqdm.tqdm(total=self.model_complexity) # _tqdm_notebook
+            pbar = tqdm.tqdm(total=self.model_complexity)
         pbar.update(1)
         while self.M_ < self.model_complexity:
             start_time = time.time()
@@ -229,12 +227,12 @@ class LolimotRegressor(BaseEstimator, RegressorMixin):
             for j in range(self.N):
                 self.x_range.append((X[:, j].min(), X[:, j].max()))
 
-        # --- modell fitting ---
+        # --- model fitting ---
         self._construct_component_models()
         # ----------------------
         
         self.training_duration = time.time() - start_time
-        #print(f"[INFO] Finished model training after {time.time() - start_time:.4f} seconds.")
+        # print(f"[INFO] Finished model training after {time.time() - start_time:.4f} seconds.")
         return self
 
     def predict(self, X):
@@ -257,7 +255,7 @@ class LolimotRegressor(BaseEstimator, RegressorMixin):
                 y = self.Theta[m, 1] * u + self.Theta[m, 0]
                 c = self.Theta[m, 1] * self.Xi[:, m] + self.Theta[m, 0]
                 yield u, y, c
-        elif self.N ==2:
+        elif self.N == 2:
             for m, m_range in enumerate(self.model_range):
                 u1 = np.linspace(*m_range[0], 2)
                 u2 = np.linspace(*m_range[1], 2)
