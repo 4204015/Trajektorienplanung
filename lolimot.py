@@ -82,7 +82,7 @@ class LolimotRegressor(BaseEstimator, RegressorMixin):
                 # old (explicit) implementation:
                 #Theta[i, :] = (np.linalg.inv(X_reg.T @ Q_m @ X_reg) @ X_reg.T @ Q_m @ self.y).flatten()
             except np.linalg.LinAlgError as err:
-                print(f"[WARNING]: Traning was aborted because of singular matrix with M={self.M_}")
+                print(f"[WARNING]: Training was aborted because of singular matrix with M={self.M_}")
                 raise
         return Theta
     
