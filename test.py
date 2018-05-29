@@ -10,9 +10,8 @@ from lolimot import LolimotRegressor
 class LolimotTest:
     
     def setUp(self):
-        self.lolimot = LolimotRegressor() 
-        
-        #self.Theta = None
+        self.lolimot = LolimotRegressor()
+        self.Theta = None
         
     def test_update_validity_functions(self):
         X = self.lolimot.X
@@ -34,23 +33,25 @@ class LolimotTest:
     def test_get_theta(self):
         npt.assert_allclose(
                 self.lolimot._get_theta((0, )).flatten(),
-                self.Theta, atol=1e-14) 
-    
+                self.Theta, atol=1e-14)
+
+
 class LolimotTest1D(LolimotTest, unittest.TestCase):
-    
+
     def setUp(self):
         self.lolimot = LolimotRegressor()
         self.lolimot.M_ = 1
         self.lolimot.N = 1
         self.lolimot.k = 2
         self.lolimot.X = np.array([[1], [3]])
-        self.lolimot.y = np.array([[1], [2]])
+        self.lolimot.y = np.array([1, 2])
         self.lolimot.Xi = np.array([[2]])
         self.lolimot.Sigma = np.ones_like(self.lolimot.Xi) * 0.5
         self.lolimot.A = np.ones((self.lolimot.M_, self.lolimot.k))
         
         # expected results
         self.Theta = [0.5, 0.5]
+
 
 class LolimotTest2D(LolimotTest, unittest.TestCase):
     
@@ -60,7 +61,7 @@ class LolimotTest2D(LolimotTest, unittest.TestCase):
         self.lolimot.N = 2
         self.lolimot.k = 3
         self.lolimot.X = np.array([[1, 1], [1, 3], [3, 3]])
-        self.lolimot.y = np.array([[1], [2], [5]])
+        self.lolimot.y = np.array([1 ,2, 5])
         self.lolimot.Xi = np.array([[1, 3, 2], [1, 1, 3]])
         self.lolimot.Sigma = np.ones_like(self.lolimot.Xi) * 0.5
         self.lolimot.A = np.ones((self.lolimot.M_, self.lolimot.k))
