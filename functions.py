@@ -7,7 +7,7 @@ import scipy.interpolate as scip
 
 def sidestepping_spline_func_gen(kind, position=False, start_end=(0, 0), diff=0, **kwargs):
 
-    def sidestepping_spline(t, t_range, param):
+    def sidestepping_spline(t, t_range, param, start_end=start_end):
         if kind in ['nearest']:
             spline_func = lambda x, y: scip.interp1d(x, y, kind, fill_value=0.0, bounds_error=False)
         elif isinstance(kind, int):

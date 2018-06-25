@@ -9,7 +9,7 @@ from bokeh.io import push_notebook
 
 
 class SampleGenerator:
-    def __init__(self, f, g, xx, x0, t0, T, input_func,
+    def __init__(self, f, g, xx, x0, t0, T, input_func=None,
                  model_parameters=(), func_parameters=None,
                  search_space=None, step_size=0.1e-3, seed=42):
         self.system = st.SimulationModel(f, g, xx, model_parameters)
@@ -22,6 +22,10 @@ class SampleGenerator:
         self.search_space = search_space
 
         np.random.seed(seed)
+
+    def set_input_func(self, input_func, func_parameters):
+        self.input_func = input_func
+        self.func_parameters = func_parameters
 
     def _get_jacobian(self, target, dx=0.001):
         Fa = np.array(self.sim(self.param)[-1, :]) - target
@@ -95,9 +99,10 @@ class SampleGenerator:
         return params, objective_function
 
     def sim(self, param):
-        res = sci.odeint(func=self.system.create_simfunction(
-            input_function=lambda t: self.input_func(t, [self.t0, self.t0 + self.T], param),
-            use_sp2c=True), y0=self.x0, t=self.t)
+        i_func = lambda t: self.input_func(t, [self.t0, self.t0 + self.T], param,
+                                           start_end=(0.0, self.func_parameters.get('target_position', 0.0)))
+        res = sci.odeint(func=self.system.create_simfunction(input_function=i_func, use_sp2c=True),
+                         y0=self.x0, t=self.t)
 
         return res
     
