@@ -3,11 +3,10 @@
 
 import numpy as np
 import matplotlib.pyplot as plt
-import matplotlib as mpl
 import matplotlib.patches as patches
-from matplotlib.colors import LinearSegmentedColormap, Normalize
-from matplotlib import cm
-from mpl_toolkits import mplot3d
+import matplotlib.lines as lines
+from matplotlib.colors import Normalize
+
 
 class PlotterLLM:
     def __init__(self, options, sort=True):
@@ -30,6 +29,7 @@ class PlotterLLM:
         lower = (self.y_pred - half_err).ravel()
         ax.fill_between(self.u.ravel(), upper, lower,
                         color=self.standard_colors[2], alpha=0.2)
+        ax.plot(self.llm.X_train, self.llm.y_hat, 'x', color=self.standard_colors[1], markersize=5, alpha=0.5)
 
     def error(self, ax):
         ax.set_title("Absoluter Fehler")
@@ -42,15 +42,15 @@ class PlotterLLM:
         for idx, column in enumerate(self.llm.A):
             ax.plot(self.u, column, color=self.colors[idx])
             if self.llm.M_ <= 20:
-                ax.annotate(f"{self.idx[idx]}", xy=(self.llm.Xi[:, idx],
-                               np.max(column)), xytext=(-4,-20),
-                            textcoords='offset points')#, color=self.colors[idx])  
+                ax.annotate(f"{self.idx[idx]}", xy=(self.llm.Xi[:, idx], np.max(column)),
+                            xytext=(-4, -20), textcoords='offset points')
             
     def models(self, ax):
         ax.set_title("Zugehörigkeitsfunktionen")
         ax.grid(True)
         for idx, (u, y, c) in enumerate(self.llm.local_model_gen()):
             ax.plot(u, y, color=self.colors[idx])
+            ax.plot(self.llm.X_train, self.llm.y, 'x', color=self.standard_colors[1], markersize=5, alpha=0.5)
             
             markerline, stemlines, _ = ax.stem(self.llm.Xi[:, idx], c, '--')
             plt.setp(markerline, color=self.colors[idx], alpha=0.5)
@@ -58,7 +58,7 @@ class PlotterLLM:
             
             if self.llm.M_ <= 20:
                 ax.annotate(f"{self.idx[idx]}", xy=(self.llm.Xi[:, idx], c),
-                            xytext=(-4,5), textcoords='offset points')
+                            xytext=(-4, 5), textcoords='offset points')
     
     def report(self, ax):
         
@@ -67,21 +67,42 @@ class PlotterLLM:
                 
         m, s = divmod(self.llm.training_duration, 60)
         ax.set_title(f"Bericht\nTrainingszeit: {int(m)}:{s:.2f} | "
-                     + "$rmse_{min}$=" + f"{np.min(self.llm.global_loss):.6e}"
+                     + "$rmse_{min}$=" + f"{np.min(self.llm.global_loss):.4e}"
                      + r" | $\bar{t}_{grad} =$" + f"{grad:.4f}")
         ax.grid(True)
-        ax.plot(range(1, self.llm.M_ + 1), self.llm.global_loss/np.max(self.llm.global_loss),
-                color=self.standard_colors[0], label="rmse")
-        ax.set_ylabel("Nomierter RMSE")
+        ax.plot(range(1, self.llm.M_ + 1), self.llm.global_loss, color=self.standard_colors[0], label="global loss")
+        ax.set_ylabel("Global Loss")
         ax.set_xlabel("Anzahl Teilmodelle")
         ax.semilogy(True)
         ax.set_xlim(left=1)
+        tol_line = lines.Line2D([1, self.llm.M_ + 1], [self.llm.tol, self.llm.tol], alpha=0.75,
+                                lw=1, color='red', axes=ax, linestyle='dashed')
+        ax.add_line(tol_line)
     
         ax_ = ax.twinx()
         d = np.array(self.llm.split_duration)*1000
-        ax_.plot(range(1, self.llm.M_), d, color=self.standard_colors[1])
+        ax_.plot(range(1, self.llm.M_), d, color=self.standard_colors[1], alpha=0.5)
         ax_.set_ylabel('Dauer pro Split in $ms$', color=self.standard_colors[1])
         ax_.tick_params('y', colors=self.standard_colors[1])
+
+    def volume(self, ax):
+        volume = []
+        mr = self.llm.model_range
+        for r in mr:
+            ext = np.prod([np.abs(np.subtract(*r_n)) for r_n in r])
+            volume.append(ext)
+
+        idx = np.argsort(volume)
+        ax.plot(self.llm.local_loss[idx], alpha=0.75)
+        ax.set_ylabel("Local Loss")
+        ax.set_xlabel("Modell")
+        ax.grid(True)
+
+        ax2 = ax.twinx()
+        ax2.step(range(1, self.llm.M_ + 1), np.array(volume)[idx], 'y')
+        ax2.semilogy(True)
+        ax2.set_ylabel("Ausdehnung der Modelle")
+        ax2.tick_params('y', colors='y')
 
     # --- plot options 3D ---
     
@@ -93,7 +114,6 @@ class PlotterLLM:
         cs = ax.contour(*self.u, self.y_pred, 10, cmap='viridis')
         norm = Normalize(vmin=np.min(self.y_pred), vmax=np.max(self.y_pred))
         sm = plt.cm.ScalarMappable(norm=norm, cmap=cs.cmap)
-        sm.set_array([])
         self.fig.colorbar(sm, ax=ax)
         ax.legend()
         ax.set_xlabel("$x_1$")
@@ -110,7 +130,7 @@ class PlotterLLM:
     def validity_function3D(self, ax):
         ax.set_title("Zugehörigkeitsfunktionen")
         for idx, column in enumerate(self.llm.A):
-            #ax.plot(self.u, column, color=self.colors[idx])
+            # ax.plot(self.u, column, color=self.colors[idx])
             k = self.u[0].shape[0]
             cs = ax.contour(*self.u, np.reshape(column, (k, k)), 3, cmap='viridis')
         
@@ -182,5 +202,3 @@ class PlotterLLM:
             self.llm.model_range = np.array(self.llm.model_range)[sort_idx]
             
         self.plot()
-        #plt.show()
-        

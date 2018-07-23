@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 import warnings
 import numpy as np
+import sympy as sp
 import scipy.interpolate as scip
 
 
@@ -36,6 +37,33 @@ def sidestepping_spline_func_gen(kind, position=False, start_end=(0, 0), diff=0,
             return func(t)
 
     return sidestepping_spline
+
+
+def spline_func_gen(kind, start_end=(0, 0), diff=0, symbolic=False, **kwargs):
+
+    def spline(t, t_range, param, start_end=start_end):
+
+        x = np.linspace(*t_range, len(param) + 2)
+        param = np.array(param)
+
+        scipy_spline = scip.make_interp_spline(x=x, y=[start_end[0], *param, start_end[1]], k=kind, bc_type=kwargs.get('bc_type'))
+
+        if not symbolic:
+
+            if diff != 0:
+                return scipy_spline.derivative(nu=diff)(t) if t <= t_range[1] else 0
+            else:
+                return scipy_spline(t) if t <= t_range[1] else 0
+
+        else:
+            t = sp.Symbol('t')
+            knots, coeffs, degree = scipy_spline.t, scipy_spline.c, scipy_spline.k
+            basis = sp.functions.bspline_basis_set(degree, knots, t)
+            sympy_spline = sum([c * b for c, b in zip(coeffs, basis)])
+
+            return sp.diff(sympy_spline, t, diff)
+
+    return spline
 
 
 def piecewise(t, t_range, n, param):

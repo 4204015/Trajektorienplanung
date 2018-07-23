@@ -1,12 +1,17 @@
 import time
 import tqdm
+import pickle
 import numpy as np
 import numexpr as ne
-import scipy as sp
 import scipy.sparse as sps
 from copy import deepcopy
 from sklearn.base import BaseEstimator, RegressorMixin
 from sklearn.utils.validation import check_X_y, check_array, check_is_fitted
+from sklearn.preprocessing import MinMaxScaler
+
+
+class Cache:
+    pass
 
 
 class LolimotRegressor(BaseEstimator, RegressorMixin):
@@ -26,15 +31,41 @@ class LolimotRegressor(BaseEstimator, RegressorMixin):
     p : float, default: 1/3
         Proportionality factor between the rectangles' extension and the standard deviations.
 
-    model_complexity : int, default: 10
+    model_complexity : int, default: 100
         Maximum number of local models.
 
-    input_range : list of tuples, optional, default: []
+    limit_sigma : bool, default: True
+        Prevents sigma from getting smaller than 10e-18.
+
+    tol : float, default:10e-5
+        Tolerance of the global loss (training loss) for stopping criterion.
+
+    notebook : bool, default: True
+        Enables a good-looking progressbar when using in an interactive environment.
+
+    loser_refinement : bool, default: True
+        If 'True' the worst model will be selected for further loser_refinement in each pass.
+        Otherwise a model is randomly chosen in consideration of its loss,
+        which is interpreted as the probability to be selected.
+
+    input_range : list of tuples, optional
         Range of values for each input dimension N for which the model should be trained.
+        If not passed, it will be determined when fitting to data.
+
+    output_constrains: tuple, optional
+        A tuple with the lower and the upper bound of the output. Is involved when splitting models.
+
+    validation_set : list, optional
+        Data set to estimate the generalization ability of the model during training.
+        Should be like [X_val, y_val].
+
+    plotter : object, optional
+        Plotter object for live visualisation of the training process.
     """
 
-    def __init__(self, sigma=0.4, smoothing='proportional', p=1/3,
-                 model_complexity=10, input_range=None, notebook=True):
+    def __init__(self, sigma=0.4, smoothing='proportional', p=1/3, model_complexity=100, limit_sigma=True,
+                 tol=10e-5, notebook=True, loser_refinement=True, input_range=None, output_constrains=None,
+                 validation_set=None, plotter=None):
 
         # TODO: move parameter validation to 'fit' (scikit api)
         if input_range:
@@ -45,26 +76,52 @@ class LolimotRegressor(BaseEstimator, RegressorMixin):
             self.x_range = []
             self.N = None
 
-        self.sigma = sigma
+        # Stopping criterions
         self.model_complexity = model_complexity
+        self.tol = tol
 
-        self.smoothing = smoothing
+        # Free parameter/options for the algorithm
+        self.smoothing = smoothing  # string
+        self.sigma = sigma
         self.p = p
-        self.notebook = notebook
+        self.output_constrains = output_constrains
 
+        self.loser_refinement = loser_refinement  # bool
+        self.limit_sigma = limit_sigma  # bool
+
+        # Parameters of the models
         self.M_ = None          # Number of models
         self.model_range = []   # M x N
         self.Theta = None       # M x N+1
         self.A = None           # M x k
         self.Xi = None          # N x M
         self.Sigma = None       # N x M
+
+        # Training and validation data
         self.X = None           # k x N
         self.y = None           # k x _
         self.k = None           # Number of samples
-        
+
+        self.y_hat = None       # k x _ - result after training
+        self.X_train = None
+
+        self.X_val, self.y_val = check_X_y(*validation_set) if validation_set else [None, None]
+
+        # Tracking of the learning process / Visualisation
         self.global_loss = []
+        self.validation_loss = []
         self.split_duration = []
         self.training_duration = 0
+        self.plotter = plotter  # plotter object
+        self.notebook = notebook  # bool
+
+        self.cache = Cache()
+        self.cache.online_prediction = None
+        self.cache.last_M = 0
+
+        # Numpy settings
+        np.seterr(divide='raise')  # Division by zero leads to an exception instead of a warning
+        np.random.seed(42)
 
     # --- private functions ---
     def _get_theta(self, model_pointers=None):
@@ -77,13 +134,10 @@ class LolimotRegressor(BaseEstimator, RegressorMixin):
         for i, m in enumerate(model_pointers):  # for model m
             Q_m = sps.spdiags(self.A[m, :], 0, self.A[m, :].size, self.A[m, :].size)
             X_reg = np.hstack((np.ones((self.k, 1)), self.X))  # regression matrix
-            try:
-                Theta[i, :] = np.linalg.lstsq(Q_m @ X_reg, self.y @ Q_m, rcond=None)[0].flatten()
-            except np.linalg.LinAlgError:
-                print(f"[WARNING]: Training was aborted because of singular matrix with M={self.M_}")
-                raise
+            Theta[i, :] = np.linalg.lstsq(Q_m @ X_reg, self.y @ Q_m, rcond=None)[0].flatten()
+
         return Theta
-    
+
     def _update_validity_functions(self):
         c = np.zeros((self.M_, self.k))
         for m in range(self.M_):
@@ -101,11 +155,25 @@ class LolimotRegressor(BaseEstimator, RegressorMixin):
             self.Sigma = np.hstack((self.Sigma, np.zeros((self.N, 1))))
             self.model_range.append([() for _ in range(self.N)])
 
+    def _decrease_model_complexity(self, decrement=1):
+        for _ in range(decrement):
+            self.M_ -= 1
+            self.Theta = self.Theta[0:self.M_, :]
+            self.A = self.A[0:self.M_, :]
+            self.Xi = self.Xi[:, 0:self.M_]
+            self.Sigma = self.Sigma[:, 0:self.M_]
+            self.model_range.pop()
+
     def _get_sigma(self, ranges):
         if self.smoothing == 'const':
             return self.sigma
         elif self.smoothing == 'proportional':
-            return list(map(lambda r: np.abs(np.subtract(*r)) * self.p, ranges))
+            new_sigmas = np.array(list(map(lambda r: np.abs(np.subtract(*r)) * self.p, ranges)))
+            if self.limit_sigma:
+                new_sigmas[new_sigmas < 10e-18] = 10e-18
+                return new_sigmas.tolist()
+            else:
+                return new_sigmas.tolist()
         else:
             raise ValueError(f"Inadmissible smoothing parameter: '{self.smoothing}'")          
 
@@ -126,7 +194,39 @@ class LolimotRegressor(BaseEstimator, RegressorMixin):
 
     def _get_global_loss(self):
         return np.sum((self.y - self._get_model_output(self.X)) ** 2)
-    
+
+    def _predict_during_training(self, X):
+        if self.cache.last_M == self.M_:
+            return self.cache.online_prediction, self.cache.A
+        else:
+            self.cache.last_M = self.M_
+
+            X_prev = np.copy(self.X)
+            k_prev = np.copy(self.k)
+            A_prev = np.copy(self.A)
+
+            y = self.predict(X)
+            self.cache.online_prediction = y
+            self.cache.A = np.copy(self.A)
+
+            self.X = np.copy(X_prev)
+            self.k = np.copy(k_prev)
+            self.A = np.copy(A_prev)
+        return y, self.cache.A
+
+    def _get_validation_loss(self):
+        self.validation_loss.append(np.sum((self.y_val - self._predict_during_training(self.X_val)[0]) ** 2))
+        return self.validation_loss[-1]
+
+    def _get_model_volumes(self, idx=-1):
+        volumes = []
+        if idx == -1:
+            for r in self.model_range:
+                volumes.append(np.prod([np.abs(np.subtract(*r_n)) for r_n in r]))
+            return volumes
+        else:
+            return np.prod([np.abs(np.subtract(*r_n)) for r_n in self.model_range[idx]])
+
     def _split_along(self, j, l, m):
         # (a) ... split component model along j in two halves
         self.model_range[m] = deepcopy(self.model_range[l])
@@ -145,7 +245,35 @@ class LolimotRegressor(BaseEstimator, RegressorMixin):
 
         # (c) ... get models' parameter
         self.Theta[(l, m), :] = self._get_theta((l, m))
-        
+
+    def _get_model_idx_for_refinement(self):
+        if self.loser_refinement and self.output_constrains is None:  # loser loser_refinement
+            return np.argmax(self._get_local_loss())
+
+        elif None:  # lower limit for model volume
+            idxs = np.flip(np.argsort(self._get_local_loss()), axis=0)
+            i = 0
+            while not self._get_model_volumes(idxs[i]) > 1e-10:
+                i += 1
+                continue
+            return idxs[i]
+
+        elif not self.loser_refinement:  # probability approach
+            if self.M_ > 1:
+                loss = self._get_local_loss()
+                scaler = MinMaxScaler(feature_range=(np.min(loss), np.max(loss)))
+                volumes = self._get_model_volumes()
+                p = loss + np.log10((1 - scaler.fit_transform([volumes]))[0])
+            else:
+                p = self._get_local_loss()
+
+            return np.random.choice(list(range(self.M_)), p=p/np.sum(p))
+        elif self.output_constrains is not None:  # constrained output
+            y, A = self._predict_during_training(self.X_val)
+            constrain_violation = A @ (np.logical_or(
+                (y < self.output_constrains[0]), (y > self.output_constrains[1])))
+            return np.argmax(constrain_violation + np.multiply(self._get_local_loss(), 0.01))
+
     def _construct_component_models(self):
         # 1. Initialize global model
         self.M_ = 1
@@ -157,7 +285,7 @@ class LolimotRegressor(BaseEstimator, RegressorMixin):
         self.A = np.zeros((self.M_, self.k))
         self._update_validity_functions()
         self.Theta = self._get_theta((0,))
-        self.model_range.append(self.x_range)
+        self.model_range.append(deepcopy(self.x_range))
         self.global_loss.append(self._get_global_loss())
         
         tqdm.tqdm.monitor_interval = 0  # disable the monitor thread because bug in tqdm #481
@@ -166,10 +294,10 @@ class LolimotRegressor(BaseEstimator, RegressorMixin):
         else:
             pbar = tqdm.tqdm(total=self.model_complexity)
         pbar.update(1)
-        while self.M_ < self.model_complexity:
+        while (self.M_ < self.model_complexity) and not (self.tol > self.global_loss[-1]):
             start_time = time.time()
             # 2. Find worst LLM
-            l = np.argmax(self._get_local_loss())  # the model denoted by 'l' is considered for further refinement
+            l = self._get_model_idx_for_refinement()  # the model denoted by 'l' is considered for further refinement
             self._increase_model_complexity()
             m = self.M_ - 1  # denotes the most recent added model
 
@@ -190,13 +318,51 @@ class LolimotRegressor(BaseEstimator, RegressorMixin):
                 # 4. find best division (split) and apply
                 j = np.argmin(L_global)
                 self.global_loss.append(L_global[j])
+
                 self._split_along(j, l, m)
                 self.split_duration.append(time.time() - start_time)
                 pbar.update(1)
             except np.linalg.LinAlgError:
-                self.M_ -= 1  
-                break  
+                self._decrease_model_complexity()
+                print(f"[WARNING]: Training was aborted because of singular matrix with M={self.M_}")
+                break
+            except FloatingPointError:
+                self._decrease_model_complexity()
+                print(f"[WARNING]: Training was aborted because Sigma values a too small. M={self.M_}")
+                break
+
+            if self.plotter:
+                plot_data = {}
+                plot_data.update({'training_loss': L_global[j]})
+
+                if not self.M_ % 5:
+                    if self.X_val is not None:
+                        plot_data.update({'validation_loss': self._get_validation_loss()})
+
+                    y = []
+                    lower = []
+                    upper = []
+
+                    for mr in self.model_range:
+                        for r_n in mr:
+                            ranges = [np.abs(np.subtract(*r_n))]
+                            y.append(np.mean(ranges))
+                            lower.append(np.min(ranges))
+                            upper.append(np.max(ranges))
+
+                    ranges_data = {'lower': np.min(lower), 'upper': np.max(upper), 'y': np.mean(y)}
+                    plot_data.update({'model_ranges': ranges_data})
+
+                self.plotter.update(plot_data)
+
+        self.local_loss = self._get_local_loss()
+
+        if self.tol > self.global_loss[-1]:
+            print(f"[INFO]: Training finished because global loss is smaller than tol:={self.tol}.")
+
         pbar.close()
+        self.X_train = self.X
+        self.y_hat = self._get_model_output(self.X_train)
         
     def _get_model_output(self, u):
         U = np.hstack((np.ones((self.k, 1)), u)).T
@@ -266,12 +432,15 @@ class LolimotRegressor(BaseEstimator, RegressorMixin):
         else:
             print("Local models only available for N <= 2")
         
-    def save_model(self):
-        pass
+    def save(self, filename='lolimot.obj'):
+        self.plotter = None
+        with open(filename, 'wb') as output:  # Overwrites any existing file.
+            pickle.dump(self, output, pickle.HIGHEST_PROTOCOL)
 
     @staticmethod
-    def load_model():
-        pass
+    def load(filename='lolimot.obj'):
+        with open(filename, 'rb') as input_file:
+            return pickle.load(input_file)
 
 if __name__ == "__main__":
     from test import LolimotTest1D, LolimotTest2D
