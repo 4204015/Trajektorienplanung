@@ -306,12 +306,14 @@ class TrajectoryProblem:
         self.time_as_param = time_as_param
 
     def fitness(self, x):
+        l = len(self.bounds)
         if self.time_as_param:
             T = x[-1]
+            l -= 1
         else:
-            T = 0
+            T = None
 
-        res = self.sim.solve(param=x[0:2], T=T)
+        res = self.sim.solve(param=x[0:l], T=T)
         phi = res[0][:, 0]
         final_state = res[0].T[:, -1]
 
