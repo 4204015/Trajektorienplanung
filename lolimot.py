@@ -8,6 +8,8 @@ from copy import deepcopy
 from sklearn.base import BaseEstimator, RegressorMixin
 from sklearn.utils.validation import check_X_y, check_array, check_is_fitted
 from sklearn.preprocessing import MinMaxScaler
+from sklearn.neighbors.kde import KernelDensity
+from sklearn.model_selection import GridSearchCV
 
 
 class Cache:
@@ -43,10 +45,14 @@ class LolimotRegressor(BaseEstimator, RegressorMixin):
     notebook : bool, default: True
         Enables a good-looking progressbar when using in an interactive environment.
 
-    loser_refinement : bool, default: True
-        If 'True' the worst model will be selected for further loser_refinement in each pass.
+    refinement : bool, default: True
+        If 'True' the worst model will be selected for further refinement in each pass.
         Otherwise a model is randomly chosen in consideration of its loss,
         which is interpreted as the probability to be selected.
+
+    data_weighting : bool, default: False
+        Enables the weighting of the data anti-proportional
+        to the data density in order to compensate for the data distribution.
 
     input_range : list of tuples, optional
         Range of values for each input dimension N for which the model should be trained.
@@ -64,8 +70,8 @@ class LolimotRegressor(BaseEstimator, RegressorMixin):
     """
 
     def __init__(self, sigma=0.4, smoothing='proportional', p=1/3, model_complexity=100, limit_sigma=True,
-                 tol=10e-5, notebook=True, loser_refinement=True, input_range=None, output_constrains=None,
-                 validation_set=None, plotter=None):
+                 tol=10e-5, notebook=True, refinement='loser', data_weighting=False, input_range=None,
+                 output_constrains=None, validation_set=None, plotter=None):
 
         # TODO: move parameter validation to 'fit' (scikit api)
         if input_range:
@@ -85,8 +91,9 @@ class LolimotRegressor(BaseEstimator, RegressorMixin):
         self.sigma = sigma
         self.p = p
         self.output_constrains = output_constrains
+        self.data_weighting = data_weighting
 
-        self.loser_refinement = loser_refinement  # bool
+        self.refinement = refinement  # bool
         self.limit_sigma = limit_sigma  # bool
 
         # Parameters of the models
@@ -132,9 +139,9 @@ class LolimotRegressor(BaseEstimator, RegressorMixin):
             num_model = len(model_pointers)
         Theta = np.zeros((num_model, self.N + 1))
         for i, m in enumerate(model_pointers):  # for model m
-            Q_m = sps.spdiags(self.A[m, :], 0, self.A[m, :].size, self.A[m, :].size)
+            Q_m = sps.spdiags(self.A[m, :], diags=0, m=self.k, n=self.k)
             X_reg = np.hstack((np.ones((self.k, 1)), self.X))  # regression matrix
-            Theta[i, :] = np.linalg.lstsq(Q_m @ X_reg, self.y @ Q_m, rcond=None)[0].flatten()
+            Theta[i, :] = np.linalg.lstsq(Q_m @ self.R @ X_reg, self.y @ self.R @ Q_m, rcond=None)[0].flatten()
 
         return Theta
 
@@ -247,10 +254,10 @@ class LolimotRegressor(BaseEstimator, RegressorMixin):
         self.Theta[(l, m), :] = self._get_theta((l, m))
 
     def _get_model_idx_for_refinement(self):
-        if self.loser_refinement and self.output_constrains is None:  # loser loser_refinement
+        if self.refinement == 'loser' and self.output_constrains is None:  # loser refinement
             return np.argmax(self._get_local_loss())
 
-        elif None:  # lower limit for model volume
+        elif self.refinement == 'limited':  # lower limit for model volume
             idxs = np.flip(np.argsort(self._get_local_loss()), axis=0)
             i = 0
             while not self._get_model_volumes(idxs[i]) > 1e-10:
@@ -258,7 +265,7 @@ class LolimotRegressor(BaseEstimator, RegressorMixin):
                 continue
             return idxs[i]
 
-        elif not self.loser_refinement:  # probability approach
+        elif self.refinement == 'probability':  # probability approach
             if self.M_ > 1:
                 loss = self._get_local_loss()
                 scaler = MinMaxScaler(feature_range=(np.min(loss), np.max(loss)))
@@ -268,6 +275,7 @@ class LolimotRegressor(BaseEstimator, RegressorMixin):
                 p = self._get_local_loss()
 
             return np.random.choice(list(range(self.M_)), p=p/np.sum(p))
+
         elif self.output_constrains is not None:  # constrained output
             y, A = self._predict_during_training(self.X_val)
             constrain_violation = A @ (np.logical_or(
@@ -392,6 +400,15 @@ class LolimotRegressor(BaseEstimator, RegressorMixin):
         if not self.x_range:
             for j in range(self.N):
                 self.x_range.append((X[:, j].min(), X[:, j].max()))
+
+        if self.data_weighting:
+            grid = GridSearchCV(KernelDensity(), {'bandwidth': np.linspace(0.1, 1.0, 10)}, cv=3)
+            grid.fit(X)
+            self.kde = KernelDensity(bandwidth=0.35, kernel='gaussian').fit(X)
+            rep_dens = np.reciprocal(np.exp(self.kde.score_samples(X)))
+            self.R = sps.spdiags(rep_dens/np.max(rep_dens), diags=0, m=self.k, n=self.k)
+        else:
+            self.R = np.identity(self.k)
 
         # --- model fitting ---
         self._construct_component_models()
