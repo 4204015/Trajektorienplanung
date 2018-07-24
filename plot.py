@@ -104,6 +104,18 @@ class PlotterLLM:
         ax2.set_ylabel("Ausdehnung der Modelle")
         ax2.tick_params('y', colors='y')
 
+    def distribution(self, ax):
+        x_grid = np.linspace(*self.llm.x_range[0], 1000)
+        ax.plot(x_grid, np.exp(self.llm.kde.score_samples(x_grid[:, np.newaxis])))
+        ax.set_xlabel("Eingangsraum")
+        ax.set_ylabel("geschätze Wahrscheinlichkeitsdichtefunktion")
+        ax.grid(True)
+
+        ax2 = ax.twinx()
+        weights = np.diagonal(self.llm.R.toarray())
+        ax2.scatter(self.llm.X_train, weights)
+        ax2.set_ylabel("Gewichtung")
+
     # --- plot options 3D ---
     
     def result3D(self, ax):
