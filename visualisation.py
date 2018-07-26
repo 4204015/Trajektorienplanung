@@ -1,6 +1,7 @@
 import time
 import numpy as np
 import matplotlib.pyplot as plt
+from matplotlib.ticker import NullFormatter
 from collections import deque
 from bokeh.io import push_notebook
 from bokeh.models.glyphs import Rect, Line, Ellipse
@@ -150,3 +151,38 @@ def plot_sim_states(res, size=(12, 12)):
     plt.xlabel("t in s")
     plt.grid()
     plt.tight_layout()
+
+
+def plot_sample_distribution_scatter(S, labels=("x", "y"), size=10):
+    nullfmt = NullFormatter()  # no labels
+    plt.figure(figsize=(size, size))
+
+    # definitions for the axes
+    left, width = 0.1, 0.65
+    bottom, height = 0.1, 0.65
+    bottom_h = left_h = left + width + 0.02
+
+    rect_scatter = [left, bottom, width, height]
+    rect_histx = [left, bottom_h, width, 0.2]
+    rect_histy = [left_h, bottom, 0.2, height]
+
+    axScatter = plt.axes(rect_scatter)
+    axHistx = plt.axes(rect_histx)
+    axHisty = plt.axes(rect_histy)
+
+    # no labels for histograms
+    axHistx.xaxis.set_major_formatter(nullfmt)
+    axHisty.yaxis.set_major_formatter(nullfmt)
+
+    axScatter.scatter(*S.T)
+    axScatter.set_xlabel(labels[0])
+    axScatter.set_ylabel(labels[1])
+    axScatter.grid(True)
+
+    axHistx.hist(S[:, 0], 50, ec='white')
+    axHisty.hist(S[:, 1], 50, orientation='horizontal', ec='white')
+    axHistx.xaxis.grid(True)
+    axHisty.yaxis.grid(True)
+
+    axHistx.set_xlim(axScatter.get_xlim())
+    axHisty.set_ylim(axScatter.get_ylim())
