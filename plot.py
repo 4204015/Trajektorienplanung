@@ -113,8 +113,9 @@ class PlotterLLM:
 
         ax2 = ax.twinx()
         weights = np.diagonal(self.llm.R.toarray())
-        ax2.scatter(self.llm.X_train, weights)
+        ax2.scatter(self.llm.X_train, weights, 'y')
         ax2.set_ylabel("Gewichtung")
+        ax2.tick_params('y', colors='y')
 
     # --- plot options 3D ---
     
