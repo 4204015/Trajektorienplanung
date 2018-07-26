@@ -39,7 +39,7 @@ def sidestepping_spline_func_gen(kind, position=False, start_end=(0, 0), diff=0,
     return sidestepping_spline
 
 
-def spline_func_gen(kind, start_end=(0, 0), diff=0, symbolic=False, **kwargs):
+def spline_func_gen(kind, start_end=(0.0, 0.0), diff=0, symbolic=False, **kwargs):
 
     def spline(t, t_range, param, start_end=start_end):
 

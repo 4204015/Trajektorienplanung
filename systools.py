@@ -299,11 +299,15 @@ def logistic(x, L=1.0, k=1.0, x0=0.0):
 
 
 class TrajectoryProblem:
-    def __init__(self, simulator, bounds, weights=(1, 1, 1, 1), time_as_param=False):
+    def __init__(self, simulator, bounds, weights=None, time_as_param=False, specify_end=False):
         self.sim = simulator
-        self.W = np.diag(weights)
+        self.W = np.diag(weights) if weights else np.identity(len(bounds))
         self.bounds = bounds # e.g. [(-5, 5), (-10, 10)]
         self.time_as_param = time_as_param
+        self.specify_end = specify_end
+
+        if self.time_as_param and self.specify_end:
+            raise NotImplementedError
 
     def fitness(self, x):
         l = len(self.bounds)
@@ -313,21 +317,30 @@ class TrajectoryProblem:
         else:
             T = None
 
-        res = self.sim.solve(param=x[0:l], T=T)
+        end = 0.0
+        if self.specify_end:
+            end = x[-1]
+            l -= 1
+
+        res = self.sim.solve(param=x[0:l], T=T, start_end=(0.0, end))
         phi = res[0][:, 0]
         final_state = res[0].T[:, -1]
+        q = final_state[1]
 
         # Root Mean Squared Error of the weighted states
         rms = np.sqrt(final_state.T @ self.W @ final_state)
 
+        penalties = np.zeros(self.W.shape[0])
+
         # penalty for big angles
         phi_penalty = logistic(x=np.max(np.abs(phi)), L=80, k=8.5, x0=np.pi*0.65)
+        penalties[0] = phi_penalty
 
-        # penalty for big params
-        #factor = 0.0
-        #param_penalty = np.sqrt(x[0:2].T @ x[0:2])
+        # penalty for positions outside [0, 0.8]
+        position_penalty = logistic(x=q, L=80, k=75, x0=0.9) - logistic(x=q, L=80, k=75, x0=-0.1) + 80
+        penalties[1] = position_penalty
 
-        return [rms + phi_penalty]# + factor*param_penalty]
+        return [rms + np.diagonal(self.W) @ penalties]
 
     def get_bounds(self):
         return tuple(zip(*self.bounds))
