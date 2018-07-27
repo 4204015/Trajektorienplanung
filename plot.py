@@ -9,7 +9,7 @@ from matplotlib.colors import Normalize
 
 
 class PlotterLLM:
-    def __init__(self, options, sort=True):
+    def __init__(self, options, sort=False):
         self.options = options
         n = len(options)
         self.fig, self.axes = plt.subplots(nrows=n, ncols=1)
@@ -41,7 +41,7 @@ class PlotterLLM:
         ax.set_title("Zugehörigkeitsfunktionen")
         for idx, column in enumerate(self.llm.A):
             ax.plot(self.u, column, color=self.colors[idx])
-            if self.llm.M_ <= 20:
+            if self.llm.M <= 20:
                 ax.annotate(f"{self.idx[idx]}", xy=(self.llm.Xi[:, idx], np.max(column)),
                             xytext=(-4, -20), textcoords='offset points')
             
@@ -56,32 +56,32 @@ class PlotterLLM:
             plt.setp(markerline, color=self.colors[idx], alpha=0.5)
             plt.setp(stemlines, color=self.colors[idx], alpha=0.5)
             
-            if self.llm.M_ <= 20:
+            if self.llm.M <= 20:
                 ax.annotate(f"{self.idx[idx]}", xy=(self.llm.Xi[:, idx], c),
                             xytext=(-4, 5), textcoords='offset points')
     
     def report(self, ax):
         
         # linear regression
-        grad = 2 * self.llm.training_duration * 1000 / (self.llm.M_ + 1)**2
+        grad = 2 * self.llm.training_duration * 1000 / (self.llm.M + 1)**2
                 
         m, s = divmod(self.llm.training_duration, 60)
         ax.set_title(f"Bericht\nTrainingszeit: {int(m)}:{s:.2f} | "
                      + "$rmse_{min}$=" + f"{np.min(self.llm.global_loss):.4e}"
                      + r" | $\bar{t}_{grad} =$" + f"{grad:.4f}")
         ax.grid(True)
-        ax.plot(range(1, self.llm.M_ + 1), self.llm.global_loss, color=self.standard_colors[0], label="global loss")
+        ax.plot(range(1, self.llm.M + 1), self.llm.global_loss, color=self.standard_colors[0], label="global loss")
         ax.set_ylabel("Global Loss")
         ax.set_xlabel("Anzahl Teilmodelle")
         ax.semilogy(True)
         ax.set_xlim(left=1)
-        tol_line = lines.Line2D([1, self.llm.M_ + 1], [self.llm.tol, self.llm.tol], alpha=0.75,
+        tol_line = lines.Line2D([1, self.llm.M + 1], [self.llm.training_tol, self.llm.training_tol], alpha=0.75,
                                 lw=1, color='red', axes=ax, linestyle='dashed')
         ax.add_line(tol_line)
     
         ax_ = ax.twinx()
         d = np.array(self.llm.split_duration)*1000
-        ax_.plot(range(1, self.llm.M_), d, color=self.standard_colors[1], alpha=0.5)
+        ax_.plot(range(1, self.llm.M), d, color=self.standard_colors[1], alpha=0.5)
         ax_.set_ylabel('Dauer pro Split in $ms$', color=self.standard_colors[1])
         ax_.tick_params('y', colors=self.standard_colors[1])
 
@@ -99,23 +99,26 @@ class PlotterLLM:
         ax.grid(True)
 
         ax2 = ax.twinx()
-        ax2.step(range(1, self.llm.M_ + 1), np.array(volume)[idx], 'y')
+        ax2.step(range(1, self.llm.M + 1), np.array(volume)[idx], 'y')
         ax2.semilogy(True)
         ax2.set_ylabel("Ausdehnung der Modelle")
         ax2.tick_params('y', colors='y')
 
     def distribution(self, ax):
-        x_grid = np.linspace(*self.llm.x_range[0], 1000)
-        ax.plot(x_grid, np.exp(self.llm.kde.score_samples(x_grid[:, np.newaxis])))
-        ax.set_xlabel("Eingangsraum")
-        ax.set_ylabel("geschätze Wahrscheinlichkeitsdichtefunktion")
-        ax.grid(True)
+        try:
+            x_grid = np.linspace(*self.llm.input_range[0], 1000)
+            ax.plot(x_grid, np.exp(self.llm.kde.score_samples(x_grid[:, np.newaxis])))
+            ax.set_xlabel("Eingangsraum")
+            ax.set_ylabel("geschätze WDF")
+            ax.grid(True)
 
-        ax2 = ax.twinx()
-        weights = np.diagonal(self.llm.R.toarray())
-        ax2.scatter(self.llm.X_train, weights, 'y')
-        ax2.set_ylabel("Gewichtung")
-        ax2.tick_params('y', colors='y')
+            ax2 = ax.twinx()
+            weights = np.diagonal(self.llm.R.toarray())
+            ax2.scatter(self.llm.X_train, weights, color='y')
+            ax2.set_ylabel("Gewichtung")
+            ax2.tick_params('y', colors='y')
+        except AttributeError:
+            print("[WARNING]: Plotting distribution failed.")
 
     # --- plot options 3D ---
     
@@ -200,18 +203,17 @@ class PlotterLLM:
             self.y = np.reshape(y, (k, k))
         else:
             self.options = ["report"]
-            
-            
+
         # define colors for each model
         self.standard_colors = plt.get_cmap('plasma')(np.linspace(0, 0.9, 4))
-        self.colors = plt.get_cmap('inferno')(np.linspace(0, 0.9, llm.M_))
+        self.colors = plt.get_cmap('inferno')(np.linspace(0, 0.9, llm.M))
         
         if self.sort and self.llm.N <= 1:
             sort_idx = np.argsort(llm.Xi, axis=1)[0]
             self.idx = sort_idx
-            llm.Xi = llm.Xi[:, sort_idx]
-            llm.A = llm.A[sort_idx, :]
-            llm.Theta = llm.Theta[sort_idx, :]
-            self.llm.model_range = np.array(self.llm.model_range)[sort_idx]
+            llm.Xi_ = llm.Xi[:, sort_idx]
+            llm.A_ = llm.A[sort_idx, :]
+            llm.Theta_ = llm.Theta[sort_idx, :]
+            self.llm.model_range_ = np.array(self.llm.model_range)[sort_idx]
             
         self.plot()
