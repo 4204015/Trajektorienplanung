@@ -6,7 +6,7 @@ import numexpr as ne
 import scipy.sparse as sps
 from copy import deepcopy
 from sklearn.base import BaseEstimator, RegressorMixin
-from sklearn.utils.validation import check_X_y, check_array, check_is_fitted
+from sklearn.utils.validation import check_X_y, check_array, check_is_fitted, check_random_state
 from sklearn.preprocessing import MinMaxScaler
 from sklearn.neighbors.kde import KernelDensity
 from sklearn.model_selection import GridSearchCV
@@ -39,8 +39,11 @@ class LolimotRegressor(BaseEstimator, RegressorMixin):
     limit_sigma : bool, default: True
         Prevents sigma from getting smaller than 10e-18.
 
-    tol : float, default:10e-5
-        Tolerance of the global loss (training loss) for stopping criterion.
+    training_tol : float, default: 1e-4
+        Tolerance of the global loss (training loss) for stopping.
+
+    early_stopping_tol : float, default: 1e+0
+        Tolerance of the validation loss for stopping.
 
     notebook : bool, default: True
         Enables a good-looking progressbar when using in an interactive environment.
@@ -65,13 +68,19 @@ class LolimotRegressor(BaseEstimator, RegressorMixin):
         Data set to estimate the generalization ability of the model during training.
         Should be like [X_val, y_val].
 
+    random_state : RandomState or an int seed, optional
+        A random number generator instance to define the state of the random permutations generator.
+
     plotter : object, optional
         Plotter object for live visualisation of the training process.
     """
 
     def __init__(self, sigma=0.4, smoothing='proportional', p=1/3, model_complexity=100, limit_sigma=True,
-                 tol=10e-5, notebook=True, refinement='loser', data_weighting=False, input_range=None,
-                 output_constrains=None, validation_set=None, plotter=None):
+                 training_tol=1e-4, early_stopping=False, early_stopping_tol=0.075, notebook=True, refinement='loser',
+                 data_weighting=False, input_range=None, output_constrains=None, validation_set=None, random_state=None,
+                 plotter=None):
+
+        self.random_state = random_state
 
         # TODO: move parameter validation to 'fit' (scikit api)
         if input_range:
@@ -84,7 +93,11 @@ class LolimotRegressor(BaseEstimator, RegressorMixin):
 
         # Stopping criterions
         self.model_complexity = model_complexity
-        self.tol = tol
+        self.training_tol = training_tol
+        self.early_stopping = early_stopping
+        self.early_stopping_tol = early_stopping_tol
+        if self.early_stopping_tol != 0.075 and not self.early_stopping:
+            print("[WARNING]: A tolerance for early stopping was set, but early stopping is disabled!")
 
         # Free parameter/options for the algorithm
         self.smoothing = smoothing  # string
@@ -274,13 +287,39 @@ class LolimotRegressor(BaseEstimator, RegressorMixin):
             else:
                 p = self._get_local_loss()
 
-            return np.random.choice(list(range(self.M_)), p=p/np.sum(p))
+            return self.random_state_.choice(list(range(self.M_)), p=p/np.sum(p))
 
         elif self.output_constrains is not None:  # constrained output
             y, A = self._predict_during_training(self.X_val)
             constrain_violation = A @ (np.logical_or(
                 (y < self.output_constrains[0]), (y > self.output_constrains[1])))
             return np.argmax(constrain_violation + np.multiply(self._get_local_loss(), 0.01))
+        else:
+            raise NotImplementedError
+
+    def _stopping_condition_met(self):
+        # determine different stopping conditions
+        complexity_reached = self.M_ >= self.model_complexity
+        tolerance_reached = self.training_tol > self.global_loss[-1]
+        if self.early_stopping and self.validation_loss[-4:-1]:
+            current_mean_val_loss = np.mean(self.validation_loss[-4:-1])
+            overfitting = ((self.validation_loss[-1] - current_mean_val_loss) >
+                           self.early_stopping_tol * current_mean_val_loss) or\
+                          ((self.validation_loss[-1] - np.min(self.validation_loss)) >
+                           self.early_stopping_tol * np.min(self.validation_loss) * 1.5)
+        else:
+            # there are not enough information yet to determine overfitting
+            overfitting = False
+
+        # in case of the fulfilment of a stopping condition print the following message
+        if complexity_reached:
+            print(f"[INFO]: Training finished with a maximal model complexity:={self.model_complexity}.")
+        elif tolerance_reached:
+            print(f"[INFO]: Training finished because global loss is smaller than tol:={self.training_tol}.")
+        elif overfitting and self.early_stopping:
+            print(f"[INFO]: Early stopping of the training.")
+
+        return complexity_reached or tolerance_reached or overfitting
 
     def _construct_component_models(self):
         # 1. Initialize global model
@@ -302,7 +341,7 @@ class LolimotRegressor(BaseEstimator, RegressorMixin):
         else:
             pbar = tqdm.tqdm(total=self.model_complexity)
         pbar.update(1)
-        while (self.M_ < self.model_complexity) and not (self.tol > self.global_loss[-1]):
+        while not self._stopping_condition_met():
             start_time = time.time()
             # 2. Find worst LLM
             l = self._get_model_idx_for_refinement()  # the model denoted by 'l' is considered for further refinement
@@ -343,31 +382,26 @@ class LolimotRegressor(BaseEstimator, RegressorMixin):
                 plot_data = {}
                 plot_data.update({'training_loss': L_global[j]})
 
-                if not self.M_ % 5:
-                    if self.X_val is not None:
-                        plot_data.update({'validation_loss': self._get_validation_loss()})
+                if self.X_val is not None:
+                    plot_data.update({'validation_loss': self._get_validation_loss()})
 
-                    y = []
-                    lower = []
-                    upper = []
+                y = []
+                lower = []
+                upper = []
 
-                    for mr in self.model_range:
-                        for r_n in mr:
-                            ranges = [np.abs(np.subtract(*r_n))]
-                            y.append(np.mean(ranges))
-                            lower.append(np.min(ranges))
-                            upper.append(np.max(ranges))
+                for mr in self.model_range:
+                    for r_n in mr:
+                        ranges = [np.abs(np.subtract(*r_n))]
+                        y.append(np.mean(ranges))
+                        lower.append(np.min(ranges))
+                        upper.append(np.max(ranges))
 
-                    ranges_data = {'lower': np.min(lower), 'upper': np.max(upper), 'y': np.mean(y)}
-                    plot_data.update({'model_ranges': ranges_data})
+                ranges_data = {'lower': np.min(lower), 'upper': np.max(upper), 'y': np.mean(y)}
+                plot_data.update({'model_ranges': ranges_data})
 
                 self.plotter.update(plot_data)
 
         self.local_loss = self._get_local_loss()
-
-        if self.tol > self.global_loss[-1]:
-            print(f"[INFO]: Training finished because global loss is smaller than tol:={self.tol}.")
-
         pbar.close()
         self.X_train = self.X
         self.y_hat = self._get_model_output(self.X_train)
@@ -383,6 +417,7 @@ class LolimotRegressor(BaseEstimator, RegressorMixin):
         """Fit the model according to the given training data."""
 
         X, y = check_X_y(X, y)
+        self.random_state_ = check_random_state(self.random_state)
 
         start_time = time.time()
 
