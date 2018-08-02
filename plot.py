@@ -29,7 +29,9 @@ class PlotterLLM:
         lower = (self.y_pred - half_err).ravel()
         ax.fill_between(self.u.ravel(), upper, lower,
                         color=self.standard_colors[2], alpha=0.2)
-        ax.plot(self.llm.X_train, self.llm.y_hat, 'x', color=self.standard_colors[1], markersize=5, alpha=0.5)
+        ax.plot(self.llm.X, self.llm.y_hat, 'x', color=self.standard_colors[1],
+                markersize=5, alpha=0.5, label=r"$\hat{y}$")
+        ax.legend()
 
     def error(self, ax):
         ax.set_title("Absoluter Fehler")
@@ -39,26 +41,28 @@ class PlotterLLM:
     
     def validity_function(self, ax):
         ax.set_title("Zugehörigkeitsfunktionen")
-        for idx, column in enumerate(self.llm.A):
+        for idx, column in enumerate(self.llm._predict(self.u)[1][self.sort_idx, :]):
             ax.plot(self.u, column, color=self.colors[idx])
             if self.llm.M <= 20:
-                ax.annotate(f"{self.idx[idx]}", xy=(self.llm.Xi[:, idx], np.max(column)),
+                ax.annotate(f"{self.sort_idx[idx]}", xy=(self.llm.Xi[:, self.sort_idx][:, idx], np.max(column)),
                             xytext=(-4, -20), textcoords='offset points')
             
     def models(self, ax):
         ax.set_title("Zugehörigkeitsfunktionen")
         ax.grid(True)
-        for idx, (u, y, c) in enumerate(self.llm.local_model_gen()):
+        for idx, (u, y, c) in enumerate(self.llm.local_model_gen(sort_idx=self.sort_idx)):
             ax.plot(u, y, color=self.colors[idx])
-            ax.plot(self.llm.X_train, self.llm.y, 'x', color=self.standard_colors[1], markersize=5, alpha=0.5)
+            ax.plot(self.llm.X, self.llm.y, 'x', color=self.standard_colors[1],
+                    markersize=5, alpha=0.5, label="$y_{train}$")
             
-            markerline, stemlines, _ = ax.stem(self.llm.Xi[:, idx], c, '--')
+            markerline, stemlines, _ = ax.stem(self.llm.Xi[:, self.sort_idx][:, idx], c, '--')
             plt.setp(markerline, color=self.colors[idx], alpha=0.5)
             plt.setp(stemlines, color=self.colors[idx], alpha=0.5)
             
             if self.llm.M <= 20:
-                ax.annotate(f"{self.idx[idx]}", xy=(self.llm.Xi[:, idx], c),
+                ax.annotate(f"{self.sort_idx[idx]}", xy=(self.llm.Xi[:, self.sort_idx][:, idx], c),
                             xytext=(-4, 5), textcoords='offset points')
+        ax.legend()
     
     def report(self, ax):
         
@@ -107,14 +111,14 @@ class PlotterLLM:
     def distribution(self, ax):
         try:
             x_grid = np.linspace(*self.llm.input_range[0], 1000)
-            ax.plot(x_grid, np.exp(self.llm.kde.score_samples(x_grid[:, np.newaxis])))
+            ax.plot(x_grid, np.exp(self.llm.kde_.score_samples(x_grid[:, np.newaxis])))
             ax.set_xlabel("Eingangsraum")
             ax.set_ylabel("geschätze WDF")
             ax.grid(True)
 
             ax2 = ax.twinx()
-            weights = np.diagonal(self.llm.R.toarray())
-            ax2.scatter(self.llm.X_train, weights, color='y')
+            weights = np.diagonal(self.llm.R_.toarray())
+            ax2.scatter(self.llm.X, weights, color='y')
             ax2.set_ylabel("Gewichtung")
             ax2.tick_params('y', colors='y')
         except AttributeError:
@@ -154,7 +158,7 @@ class PlotterLLM:
         sm = plt.cm.ScalarMappable(norm=norm, cmap=cs.cmap)
         sm.set_array([])
         self.fig.colorbar(sm, ax=ax)
-        ax.scatter(self.llm.Xi[0,:], self.llm.Xi[1,:],
+        ax.scatter(self.llm.Xi[:, self.sort_idx][0, :], self.llm.Xi[:, self.sort_idx][1, :],
                    marker='x', color=self.standard_colors[0], label=r"$\xi$")
         ax.legend(loc=4, bbox_to_anchor=(0., 1.0, 1., .102))
         ax.set_xlabel("$x_1$")
@@ -166,7 +170,7 @@ class PlotterLLM:
         for idx, r in enumerate(self.llm.model_range):
             r = list(zip(*r))
             ax.add_patch(patches.Rectangle(xy=r[0], width=r[1][0]-r[0][0], height=r[1][1]-r[0][1], fill=False)) 
-        ax.scatter(self.llm.Xi[0,:], self.llm.Xi[1,:],
+        ax.scatter(self.llm.Xi[:, self.sort_idx][0, :], self.llm.Xi[:, self.sort_idx][1, :],
                    marker='x', color=self.standard_colors[0], label=r"$\xi$")
         ax.set_xlabel("$x_1$")
         ax.set_ylabel("$x_2$")
@@ -209,11 +213,8 @@ class PlotterLLM:
         self.colors = plt.get_cmap('inferno')(np.linspace(0, 0.9, llm.M))
         
         if self.sort and self.llm.N <= 1:
-            sort_idx = np.argsort(llm.Xi, axis=1)[0]
-            self.idx = sort_idx
-            llm.Xi_ = llm.Xi[:, sort_idx]
-            llm.A_ = llm.A[sort_idx, :]
-            llm.Theta_ = llm.Theta[sort_idx, :]
-            self.llm.model_range_ = np.array(self.llm.model_range)[sort_idx]
+            self.sort_idx = np.argsort(llm.Xi, axis=1)[0]
+        else:
+            self.sort_idx = range(llm.Xi.shape[1])
             
         self.plot()
