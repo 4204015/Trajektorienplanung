@@ -131,11 +131,11 @@ class LolimotRegressor(BaseEstimator, RegressorMixin):
         self.training_duration = 0
 
         # Estimator attributes
-        self.M_ = None  # Number of models
-        self.Theta_ = None  # M x N_+1
-        self.Xi_ = None  # N_ x M
-        self.Sigma_ = None  # N_ x M
-        self.N_ = None  # k
+        self.M_ = None      # Number of models
+        self.Theta_ = None  # M x N+1
+        self.Xi_ = None     # N x M
+        self.Sigma_ = None  # N x M
+        self.N_ = None      # k
         self.kde_ = None
         self.R_ = None
 
@@ -449,17 +449,18 @@ class LolimotRegressor(BaseEstimator, RegressorMixin):
         -------
         self : returns an instance of self.
         """
-        # --- model attributes ---
+        # --- reset trainable attributes ---
         self.M_ = None           # Number of models
         self.Theta_ = None       # M x N_+1
         self.Xi_ = None          # N_ x M
         self.Sigma_ = None       # N_ x M
-        self.N_ = None           # k
 
         for attr in [self.global_loss, self.validation_loss, self.split_duration,
                      self.model_range, self.input_range, self.cache]:
             attr.clear()
-
+            
+        self.k, self.N_, *_ = X.shape
+        
         # --- input checks ---
         X, y = check_X_y(X, y, y_numeric=True)
 
@@ -472,7 +473,7 @@ class LolimotRegressor(BaseEstimator, RegressorMixin):
             assert self.N_ == len(input_range), \
                 f"Dimension N from 'input_range' and 'X' does not agree: {self.N_} ≠ {len(input_range)}"
 
-        # --- validation split --
+        # --- validation split ---
         if self.validation_size is not None and not np.isclose(self.validation_size, (0.0, )):
             if isinstance(self.validation_size, float):
                 # proportion of the dataset to include in the validation split
@@ -493,13 +494,13 @@ class LolimotRegressor(BaseEstimator, RegressorMixin):
         elif additional_validation_set:
             self.X_val, self.y_val = check_X_y(*additional_validation_set)
 
+        # --- tracking training duration
         self.training_duration = 0
         start_time = time.time()  # start tracking the training duration
 
         # --- initialising model parameter ---
         self.X = X
         self.y = y
-        self.k, self.N_, *_ = X.shape
         self.output_constrains = output_constrains
 
         if not input_range:
@@ -557,7 +558,7 @@ class LolimotRegressor(BaseEstimator, RegressorMixin):
                 yield [u1, u2], np.reshape(y, (2, 2)), c                     
         else:
             print("Local models only available for N <= 2")
-        
+
     def save(self, filename='lolimot.obj'):
         self.plotter = None
         with open(filename, 'wb') as output:  # Overwrites any existing file.
@@ -568,6 +569,31 @@ class LolimotRegressor(BaseEstimator, RegressorMixin):
         with open(filename, 'rb') as input_file:
             return pickle.load(input_file)
 
+    # --- online training ---
+
+    def init_online_training(self, forgetting_factor=0.98, activity_threshold=0.1, init_covariance=1000, plotter=None):
+        self.forgetting_factor = forgetting_factor
+        self.activity_threshold = activity_threshold
+        self.P_ = np.tile(np.identity(self.N_ + 1) * init_covariance, (self.M_, 1, 1))  # M x N x N
+        self.plotter = plotter
+
+    def online_training(self, X, y):
+        x, y = check_X_y(X, y, y_numeric=True)
+        x = np.vstack((np.ones(1), x))
+
+        A = np.zeros((self.M_, 1))
+        self._update_validity_functions(X, A)  # attention: use X instead of augmented x
+
+        # --- local recursive weighted least square update ---
+        for m in range(self.M_):
+            if A[m, :] > self.activity_threshold:
+                gamma = self.P_[m, :, :] @ x / (x.T @ self.P_[m, :, :] @ x + self.forgetting_factor * np.reciprocal(A[m, :]))
+                self.Theta_[m, :] = self.Theta[m, :] + gamma @ (y - (x.T @ self.Theta[m, :]))
+                self.P_[m, :, :] = 1/self.forgetting_factor * (self.P_[m, :, :] - gamma @ x.T @ self.P_[m, :, :])
+        
+        if self.plotter:
+            # tracking of exemplary/arbitrary weights
+            self.plotter.update({'theta00': self.Theta_[0, 0], 'theta01': self.Theta_[0, 1]})
 
 if __name__ == "__main__":
     from test import LolimotTest1D, LolimotTest2D
