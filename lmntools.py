@@ -22,9 +22,9 @@ class Cache:
             self.__dict__[key] = None
 
 
-class LolimotRegressor(BaseEstimator, RegressorMixin):
+class LMNRegressor(BaseEstimator, RegressorMixin):
     """
-    Regression using Local (linear) models trained with the LOLIMOT algorithm.
+    Regression using a Local Model Network.
 
     Parameters
     ----------
@@ -594,6 +594,21 @@ class LolimotRegressor(BaseEstimator, RegressorMixin):
         if self.plotter:
             # tracking of exemplary/arbitrary weights
             self.plotter.update({'theta00': self.Theta_[0, 0], 'theta01': self.Theta_[0, 1]})
+
+
+class StructureOptimizer:
+    """
+    Abstract optimizer base class.
+
+    Note: this is the parent class of all optimizers, not an actual optimizer
+    that can be used for training models.
+    """
+
+class Lolimot(StructureOptimizer):
+    """
+    Local Linear Model Tree
+    """
+
 
 if __name__ == "__main__":
     from test import LolimotTest1D, LolimotTest2D
