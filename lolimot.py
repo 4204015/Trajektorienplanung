@@ -13,7 +13,13 @@ from sklearn.model_selection import train_test_split
 
 
 class Cache:
-    pass
+    def __init__(self, *args):
+        for arg in args:
+            setattr(self, arg, None)
+
+    def clear(self):
+        for key in self.__dict__.keys():
+            self.__dict__[key] = None
 
 
 class LolimotRegressor(BaseEstimator, RegressorMixin):
@@ -73,12 +79,11 @@ class LolimotRegressor(BaseEstimator, RegressorMixin):
         Plotter object for live visualisation of the training process.
     """
 
-    def __init__(self, sigma=0.4, smoothing='proportional', p=1/3, model_complexity=100, limit_sigma=True,
+    def __init__(self, sigma=0.4, smoothing='proportional', p=1/3, model_complexity=5, limit_sigma=True,
                  training_tol=1e-4, early_stopping=False, early_stopping_tol=0.075, refinement='loser',
                  kde_bandwidth=0, validation_size=None, random_state=None, notebook=True, plotter=None):
 
         self.random_state = random_state
-        self.random_state_ = None  # will be set in 'fit'
 
         # Stopping criterions
         self.model_complexity = model_complexity  # int
@@ -94,46 +99,47 @@ class LolimotRegressor(BaseEstimator, RegressorMixin):
         self.refinement = refinement  # bool
         self.limit_sigma = limit_sigma  # bool
 
-        # Attributes that will been estimated from the data
-        self.M_ = None           # Number of models
-        self.model_range_ = []   # M x N
-        self.Theta_ = None       # M x N+1
-        self.Xi_ = None          # N x M
-        self.Sigma_ = None       # N x M
-        self.input_range_ = []   # N x 2
+        # Tracking of the learning process / Visualisation
+        self.validation_size = validation_size  # bool
+        self.plotter = plotter  # plotter object
+        self.notebook = notebook  # bool
+
+        self.cache = Cache('model_range_prev', 'Xi_prev', 'Sigma_prev', 'Theta_prev', 'last_M', 'prediction', 'A')
+
+        # Numpy settings
+        np.seterr(divide='raise')  # Division by zero leads to an exception instead of a warning
+
+        # --- Attributes which will be set in the 'fit' method ---
+
+        # Tracking of the learning process
+        self.global_loss = []
+        self.validation_loss = []
+        self.split_duration = []
 
         # Training and validation data
-        self.X = None           # k x N
+        self.X = None           # k x N_
         self.y = None           # k x _
         self.k = None           # Number of samples
         self.X_val = None
         self.y_val = None
 
         # Data dependent parameters
-        self.N = None           # k
         self.A = None           # M x k
         self.output_constrains = None
-        self.kde = None         # kernel density estimator
-        self.R = None           # weighting matrix
-
-        self.y_hat = None       # k x _ - result after training
-        self.X_train = None
-
-        # Tracking of the learning process / Visualisation
-        self.validation_size = validation_size # bool
-        self.global_loss = []
-        self.validation_loss = []
-        self.split_duration = []
+        self.model_range = []  # M x N_
+        self.input_range = []  # N_ x 2
         self.training_duration = 0
-        self.plotter = plotter  # plotter object
-        self.notebook = notebook  # bool
 
-        self.cache = Cache()
-        self.cache.online_prediction = None
-        self.cache.last_M = 0
+        # Estimator attributes
+        self.M_ = None  # Number of models
+        self.Theta_ = None  # M x N_+1
+        self.Xi_ = None  # N_ x M
+        self.Sigma_ = None  # N_ x M
+        self.N_ = None  # k
+        self.kde_ = None
+        self.R_ = None
 
-        # Numpy settings
-        np.seterr(divide='raise')  # Division by zero leads to an exception instead of a warning
+        self.random_state_ = None
 
     # --- properties ---
     @property
@@ -141,8 +147,8 @@ class LolimotRegressor(BaseEstimator, RegressorMixin):
         return self.M_
 
     @property
-    def model_range(self):
-        return self.model_range_
+    def N(self):
+        return self.N_
 
     @property
     def Theta(self):
@@ -153,8 +159,12 @@ class LolimotRegressor(BaseEstimator, RegressorMixin):
         return self.Xi_
 
     @property
-    def input_range(self):
-        return self.input_range_
+    def y_hat(self):
+        return self.predict(self.X)
+
+    @property
+    def local_loss(self):
+        return self._get_local_loss()
 
     # --- private functions ---
     def _get_theta(self, model_pointers=None):
@@ -163,30 +173,30 @@ class LolimotRegressor(BaseEstimator, RegressorMixin):
             num_model = self.M_
         else:
             num_model = len(model_pointers)
-        Theta = np.zeros((num_model, self.N + 1))
+        Theta = np.zeros((num_model, self.N_ + 1))
         for i, m in enumerate(model_pointers):  # for model m
             Q_m = sps.spdiags(self.A[m, :], diags=0, m=self.k, n=self.k)
             X_reg = np.hstack((np.ones((self.k, 1)), self.X))  # regression matrix
-            Theta[i, :] = np.linalg.lstsq(Q_m @ self.R @ X_reg, self.y @ self.R @ Q_m, rcond=None)[0].flatten()
+            Theta[i, :] = np.linalg.lstsq(Q_m @ self.R_ @ X_reg, self.y @ self.R_ @ Q_m, rcond=None)[0].flatten()
 
         return Theta
 
-    def _update_validity_functions(self):
-        c = np.zeros((self.M_, self.k))
+    def _update_validity_functions(self, X, A):
+        c = np.zeros(A.shape)
         for m in range(self.M_):
-            np.sum((self.X - self.Xi_.T[m, :]) ** 2 / (self.Sigma_.T[m, :] ** 2), out=c[m, :], axis=1)
+            np.sum((X - self.Xi_.T[m, :]) ** 2 / (self.Sigma_.T[m, :] ** 2), out=c[m, :], axis=1)
         mu = ne.evaluate('exp(-0.5 * c)')
         mu_sum = np.sum(mu, axis=0)  # summation along M-axis -> k
-        np.divide(mu, mu_sum, out=self.A)
+        np.divide(mu, mu_sum, out=A)
         
     def _increase_model_complexity(self, increment=1):
         for _ in range(increment):
             self.M_ += 1
-            self.Theta_ = np.vstack((self.Theta_, np.zeros((1, self.N + 1))))
+            self.Theta_ = np.vstack((self.Theta_, np.zeros((1, self.N_ + 1))))
             self.A = np.vstack((self.A, np.zeros((1, self.k))))
-            self.Xi_ = np.hstack((self.Xi_, np.zeros((self.N, 1))))
-            self.Sigma_ = np.hstack((self.Sigma_, np.zeros((self.N, 1))))
-            self.model_range_.append([() for _ in range(self.N)])
+            self.Xi_ = np.hstack((self.Xi_, np.zeros((self.N_, 1))))
+            self.Sigma_ = np.hstack((self.Sigma_, np.zeros((self.N_, 1))))
+            self.model_range.append([() for _ in range(self.N_)])
 
     def _decrease_model_complexity(self, decrement=1):
         for _ in range(decrement):
@@ -195,7 +205,7 @@ class LolimotRegressor(BaseEstimator, RegressorMixin):
             self.A = self.A[0:self.M_, :]
             self.Xi_ = self.Xi_[:, 0:self.M_]
             self.Sigma_ = self.Sigma_[:, 0:self.M_]
-            self.model_range_.pop()
+            self.model_range.pop()
 
     def _get_sigma(self, ranges):
         if self.smoothing == 'const':
@@ -211,61 +221,51 @@ class LolimotRegressor(BaseEstimator, RegressorMixin):
             raise ValueError(f"Inadmissible smoothing parameter: '{self.smoothing}'")          
 
     def _save_params(self):
-        self.model_range_prev = deepcopy(self.model_range_)
-        self.Xi_prev = np.copy(self.Xi_)
-        self.Sigma_prev = np.copy(self.Sigma_)
-        self.Theta_prev = np.copy(self.Theta_)
+        self.cache.model_range_prev = deepcopy(self.model_range)
+        self.cache.Xi_prev = np.copy(self.Xi_)
+        self.cache.Sigma_prev = np.copy(self.Sigma_)
+        self.cache.Theta_prev = np.copy(self.Theta_)
 
     def _recover_params(self):
-        self.model_range_ = deepcopy(self.model_range_prev)
-        self.Xi_ = np.copy(self.Xi_prev)
-        self.Sigma_ = np.copy(self.Sigma_prev)
-        self.Theta_ = np.copy(self.Theta_prev)
+        self.model_range = deepcopy(self.cache.model_range_prev)
+        self.Xi_ = np.copy(self.cache.Xi_prev)
+        self.Sigma_ = np.copy(self.cache.Sigma_prev)
+        self.Theta_ = np.copy(self.cache.Theta_prev)
 
     def _get_local_loss(self):
-        return self.A @ (self.y - self._get_model_output(self.X)) ** 2  # Loss function output -> M x _
+        return self.A @ (self.y - self._get_model_output(self.X, self.A)) ** 2  # Loss function output -> M x _
 
     def _get_global_loss(self):
-        return np.sum((self.y - self._get_model_output(self.X)) ** 2)
+        return np.sum((self.y - self._get_model_output(self.X, self.A)) ** 2)
 
-    def _predict_during_training(self, X):
+    def _predict_cached(self, X):
         if self.cache.last_M == self.M_:
-            return self.cache.online_prediction, self.cache.A
+            return self.cache.prediction, self.cache.A
         else:
             self.cache.last_M = self.M_
-
-            X_prev = np.copy(self.X)
-            k_prev = np.copy(self.k)
-            A_prev = np.copy(self.A)
-
-            y = self.predict(X)
-            self.cache.online_prediction = y
-            self.cache.A = np.copy(self.A)
-
-            self.X = np.copy(X_prev)
-            self.k = np.copy(k_prev)
-            self.A = np.copy(A_prev)
-        return y, self.cache.A
+            y, A = self._predict(X)
+            self.cache.prediction, self.cache.A = y, A
+        return y, A
 
     def _get_validation_loss(self):
-        self.validation_loss.append(np.sum((self.y_val - self._predict_during_training(self.X_val)[0]) ** 2))
+        self.validation_loss.append(np.sum((self.y_val - self._predict_cached(self.X_val)[0]) ** 2))
         return self.validation_loss[-1]
 
     def _get_model_volumes(self, idx=-1):
         volumes = []
         if idx == -1:
-            for r in self.model_range_:
+            for r in self.model_range:
                 volumes.append(np.prod([np.abs(np.subtract(*r_n)) for r_n in r]))
             return volumes
         else:
-            return np.prod([np.abs(np.subtract(*r_n)) for r_n in self.model_range_[idx]])
+            return np.prod([np.abs(np.subtract(*r_n)) for r_n in self.model_range[idx]])
 
     def _split_along(self, j, l, m):
         # (a) ... split component model along j in two halves
-        self.model_range_[m] = deepcopy(self.model_range_[l])
-        r = self.model_range_[l][j]
+        self.model_range[m] = deepcopy(self.model_range[l])
+        r = self.model_range[l][j]
         ranges = [(np.min(r), np.mean(r)), (np.mean(r), np.max(r))]
-        self.model_range_[l][j], self.model_range_[m][j] = ranges
+        self.model_range[l][j], self.model_range[m][j] = ranges
 
         self.Xi_[:, m] = deepcopy(self.Xi_[:, l])
         self.Xi_[j, (l, m)] = list(map(lambda x: np.mean(x), ranges))
@@ -274,7 +274,7 @@ class LolimotRegressor(BaseEstimator, RegressorMixin):
         self.Sigma_[j, (l, m)] = self._get_sigma(ranges)
 
         # (b) ... calculate validity functions all models
-        self._update_validity_functions()
+        self._update_validity_functions(self.X, self.A)
 
         # (c) ... get models' parameter
         self.Theta_[(l, m), :] = self._get_theta((l, m))
@@ -303,7 +303,7 @@ class LolimotRegressor(BaseEstimator, RegressorMixin):
             return self.random_state_.choice(list(range(self.M_)), p=p/np.sum(p))
 
         elif self.output_constrains is not None:  # constrained output
-            y, A = self._predict_during_training(self.X_val)
+            y, A = self._predict_cached(self.X_val)
             constrain_violation = A @ (np.logical_or(
                 (y < self.output_constrains[0]), (y > self.output_constrains[1])))
             return np.argmax(constrain_violation + np.multiply(self._get_local_loss(), 0.01))
@@ -337,15 +337,15 @@ class LolimotRegressor(BaseEstimator, RegressorMixin):
     def _construct_component_models(self):
         # 1. Initialize global model
         self.M_ = 1
-        self.Xi_ = np.zeros((self.N, self.M_))
-        self.Sigma_ = np.zeros((self.N, self.M_))
+        self.Xi_ = np.zeros((self.N_, self.M_))
+        self.Sigma_ = np.zeros((self.N_, self.M_))
 
-        self.Xi_[:, 0] = [np.mean(r) for r in self.input_range_]
-        self.Sigma_[:, 0] = self._get_sigma(self.input_range_)
+        self.Xi_[:, 0] = [np.mean(r) for r in self.input_range]
+        self.Sigma_[:, 0] = self._get_sigma(self.input_range)
         self.A = np.zeros((self.M_, self.k))
-        self._update_validity_functions()
+        self._update_validity_functions(self.X, self.A)
         self.Theta_ = self._get_theta((0,))
-        self.model_range_.append(deepcopy(self.input_range_))
+        self.model_range.append(deepcopy(self.input_range))
         self.global_loss.append(self._get_global_loss())
         
         tqdm.tqdm.monitor_interval = 0  # disable the monitor thread because bug in tqdm #481
@@ -357,17 +357,17 @@ class LolimotRegressor(BaseEstimator, RegressorMixin):
         while not self._stopping_condition_met():
             start_time = time.time()
             # 2. Find worst LLM
-            l = self._get_model_idx_for_refinement()  # the model denoted by 'l' is considered for further refinement
+            r = self._get_model_idx_for_refinement()  # the model denoted by 'r' is considered for further refinement
             self._increase_model_complexity()
             m = self.M_ - 1  # denotes the most recent added model
 
-            L_global = np.zeros(self.N)  # global model loss for every split attempt
+            L_global = np.zeros(self.N_)  # global model loss for every split attempt
             self._save_params()
             
             try:
                 # 3. for every input dimension ...
-                for j in range(self.N):
-                    self._split_along(j, l, m)
+                for j in range(self.N_):
+                    self._split_along(j, r, m)
     
                     # (d) ... calculate the tree's output error
                     L_global[j] = self._get_global_loss()
@@ -379,7 +379,7 @@ class LolimotRegressor(BaseEstimator, RegressorMixin):
                 j = np.argmin(L_global)
                 self.global_loss.append(L_global[j])
 
-                self._split_along(j, l, m)
+                self._split_along(j, r, m)
                 self.split_duration.append(time.time() - start_time)
                 pbar.update(1)
             except np.linalg.LinAlgError:
@@ -388,7 +388,7 @@ class LolimotRegressor(BaseEstimator, RegressorMixin):
                 break
             except FloatingPointError:
                 self._decrease_model_complexity()
-                print(f"[WARNING]: Training was aborted because Sigma_ values a too small. M={self.M_}")
+                print(f"[WARNING]: Training was aborted because Sigma values a too small. M={self.M_}")
                 break
 
             if self.plotter:
@@ -402,7 +402,7 @@ class LolimotRegressor(BaseEstimator, RegressorMixin):
                 lower = []
                 upper = []
 
-                for mr in self.model_range_:
+                for mr in self.model_range:
                     for r_n in mr:
                         ranges = [np.abs(np.subtract(*r_n))]
                         y.append(np.mean(ranges))
@@ -414,14 +414,11 @@ class LolimotRegressor(BaseEstimator, RegressorMixin):
 
                 self.plotter.update(plot_data)
 
-        self.local_loss = self._get_local_loss()
         pbar.close()
-        self.X_train = self.X
-        self.y_hat = self._get_model_output(self.X_train)
         
-    def _get_model_output(self, u):
-        U = np.hstack((np.ones((self.k, 1)), u)).T
-        y_hat = np.sum((self.Theta_ @ U) * self.A, axis=0)
+    def _get_model_output(self, u, A):
+        U = np.hstack((np.ones((A.shape[1], 1)), u)).T
+        y_hat = np.sum((self.Theta_ @ U) * A, axis=0)
         return y_hat
 
     # --- public functions ---
@@ -438,7 +435,7 @@ class LolimotRegressor(BaseEstimator, RegressorMixin):
             Target values
 
         input_range : list of tuples, optional
-            Range of values for each input dimension N for which the model should be trained.
+            Range of values for each input dimension N_ for which the model should be trained.
             If not passed, it will be determined when fitting to data.
 
         output_constrains: tuple, optional
@@ -452,9 +449,19 @@ class LolimotRegressor(BaseEstimator, RegressorMixin):
         -------
         self : returns an instance of self.
         """
+        # --- model attributes ---
+        self.M_ = None           # Number of models
+        self.Theta_ = None       # M x N_+1
+        self.Xi_ = None          # N_ x M
+        self.Sigma_ = None       # N_ x M
+        self.N_ = None           # k
+
+        for attr in [self.global_loss, self.validation_loss, self.split_duration,
+                     self.model_range, self.input_range, self.cache]:
+            attr.clear()
 
         # --- input checks ---
-        X, y = check_X_y(X, y)
+        X, y = check_X_y(X, y, y_numeric=True)
 
         self.random_state_ = check_random_state(self.random_state)
 
@@ -462,11 +469,11 @@ class LolimotRegressor(BaseEstimator, RegressorMixin):
             print("[WARNING]: A tolerance for early stopping was set, but early stopping is disabled!")
 
         if input_range:
-            assert self.N == len(input_range),\
-                f"Dimension N from 'input_range' and 'X' does not agree: {self.N} ≠ {len(input_range)}"
+            assert self.N_ == len(input_range), \
+                f"Dimension N from 'input_range' and 'X' does not agree: {self.N_} ≠ {len(input_range)}"
 
         # --- validation split --
-        if self.validation_size is not None and not np.isclose(self.validation_size, 0.0):
+        if self.validation_size is not None and not np.isclose(self.validation_size, (0.0, )):
             if isinstance(self.validation_size, float):
                 # proportion of the dataset to include in the validation split
                 train_size = 1.0 - self.validation_size
@@ -475,9 +482,9 @@ class LolimotRegressor(BaseEstimator, RegressorMixin):
                 train_size = int(X.shape[0] - self.validation_size)
 
             X, self.X_val, y, self.y_val = train_test_split(X, y, train_size=train_size,
-                                                                      test_size=self.validation_size,
-                                                                      random_state=self.random_state_,
-                                                                      shuffle=True)
+                                                            test_size=self.validation_size,
+                                                            random_state=self.random_state_,
+                                                            shuffle=True)
 
         if additional_validation_set and self.X_val is not None:
             X_val_add, y_val_add = check_X_y(*additional_validation_set)
@@ -486,27 +493,27 @@ class LolimotRegressor(BaseEstimator, RegressorMixin):
         elif additional_validation_set:
             self.X_val, self.y_val = check_X_y(*additional_validation_set)
 
+        self.training_duration = 0
         start_time = time.time()  # start tracking the training duration
 
         # --- initialising model parameter ---
         self.X = X
         self.y = y
-        self.k, self.N, *_ = X.shape
+        self.k, self.N_, *_ = X.shape
         self.output_constrains = output_constrains
 
         if not input_range:
-            for j in range(self.N):
-                self.input_range_.append((X[:, j].min(), X[:, j].max()))
+            for j in range(self.N_):
+                self.input_range.append((X[:, j].min(), X[:, j].max()))
         else:
-            self.input_range_ = input_range
+            self.input_range = input_range
 
-        if not np.isclose(self.kde_bandwidth, 0.0):
-            self.kde = KernelDensity(bandwidth=self.kde_bandwidth, kernel='gaussian').fit(X)
-            rep_dens = np.reciprocal(np.exp(self.kde.score_samples(X)))
-            self.R = sps.spdiags(rep_dens/np.max(rep_dens), diags=0, m=self.k, n=self.k)
+        if not np.isclose(self.kde_bandwidth, (0.0, )):
+            self.kde_ = KernelDensity(bandwidth=self.kde_bandwidth, kernel='gaussian').fit(X)
+            rep_dens = np.reciprocal(np.exp(self.kde_.score_samples(X)))
+            self.R_ = sps.spdiags(rep_dens / np.max(rep_dens), diags=0, m=self.k, n=self.k)
         else:
-            self.R = np.identity(self.k)
-
+            self.R_ = np.identity(self.k)
 
         # --- model fitting ---
         self._construct_component_models()
@@ -514,7 +521,14 @@ class LolimotRegressor(BaseEstimator, RegressorMixin):
         
         self.training_duration = time.time() - start_time
         # print(f"[INFO] Finished model training after {time.time() - start_time:.4f} seconds.")
+
         return self
+
+    def _predict(self, X):
+        k = X.shape[0]
+        A = np.zeros((self.M_, k))
+        self._update_validity_functions(X, A)
+        return self._get_model_output(X, A), A
 
     def predict(self, X):
         # Check is fit had been called
@@ -522,27 +536,24 @@ class LolimotRegressor(BaseEstimator, RegressorMixin):
 
         # Input validation
         X = check_array(X)
+        return self._predict(X)[0]
 
-        self.X = X
-        self.k = X.shape[0]
-        self.A = np.zeros((self.M_, self.k))
-        self._update_validity_functions()
-        return self._get_model_output(X)
-
-    def local_model_gen(self):
-        if self.N == 1:
-            for m, m_range in enumerate(self.model_range_):
+    def local_model_gen(self, sort_idx):
+        Theta = self.Theta_[sort_idx, :]
+        Xi = self.Xi_[:, sort_idx]
+        if self.N_ == 1:
+            for m, m_range in enumerate(np.array(self.model_range)[sort_idx]):
                 u = np.linspace(*m_range[0])
-                y = self.Theta_[m, 1] * u + self.Theta_[m, 0]
-                c = self.Theta_[m, 1] * self.Xi_[:, m] + self.Theta_[m, 0]
+                y = Theta[m, 1] * u + Theta[m, 0]
+                c = Theta[m, 1] * Xi[:, m] + Theta[m, 0]
                 yield u, y, c
-        elif self.N == 2:
-            for m, m_range in enumerate(self.model_range_):
+        elif self.N_ == 2:
+            for m, m_range in enumerate(self.model_range):
                 u1 = np.linspace(*m_range[0], 2)
                 u2 = np.linspace(*m_range[1], 2)
                 u1, u2 = np.meshgrid(u1, u2)
-                y = self.Theta_[m, 2] * u2 + self.Theta_[m, 1] * u1 + self.Theta_[m, 0]
-                c = self.Theta_[m, 2] * self.Xi_[1, m] + self.Theta_[m, 1] * self.Xi_[0, m] + self.Theta_[m, 0]
+                y = Theta[m, 2] * u2 + Theta[m, 1] * u1 + Theta[m, 0]
+                c = Theta[m, 2] * Xi[1, m] + Theta[m, 1] * Xi[0, m] + Theta[m, 0]
                 yield [u1, u2], np.reshape(y, (2, 2)), c                     
         else:
             print("Local models only available for N <= 2")
