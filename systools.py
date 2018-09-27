@@ -1,13 +1,11 @@
 import sympy as sp
-import time
+import math
 import symbtools.modeltools as mt
 import matplotlib.pyplot as plt
 
-from functions import sidestepping_spline_func_gen
 from visualisation import PendelWagenSystem as PWSVis
 
 import numpy as np
-import pandas as pd
 import scipy.integrate as sci
 import symbtools as st
 
@@ -15,7 +13,7 @@ from sklearn.base import BaseEstimator
 from bokeh.plotting import show
 from bokeh.layouts import row, gridplot
 from bokeh.io import push_notebook
-from bokeh.models import Band, ColumnDataSource
+from bokeh.models import Band
 from bokeh.models import Range1d
 
 
@@ -184,10 +182,10 @@ class TrainingPlotter:
             new_data = dict()
             if self.i == 0:
 
-                if fig.title.text == 'phase_space':
+                if fig.title.text == 'samples':
                     fig.xaxis.axis_label = 'phi'
                     fig.yaxis.axis_label = 'phi_dot'
-                    new_data['x'], new_data['y'], *_ = [[data[0]], [data[2]]]
+                    new_data['x'], new_data['y'], *_ = [data[0], data[1]]
 
                 elif fig.title.text == 'model_ranges':
 
@@ -206,9 +204,9 @@ class TrainingPlotter:
 
 
             else:
-                if fig.title.text == 'phase_space':
-                    new_data['x'] = plot.data_source.data['x'] + [data[0]]
-                    new_data['y'] = plot.data_source.data['y'] + [data[2]]
+                if fig.title.text == 'samples':
+                    new_data['x'] = plot.data_source.data['x'] + data[0]
+                    new_data['y'] = plot.data_source.data['y'] + data[1]
                 elif fig.title.text == 'model_ranges':
                     new_data['x'] = plot.data_source.data['x'] + [self.i]
                     new_data['y'] = plot.data_source.data['y'] + [data['y']]
@@ -299,49 +297,114 @@ def logistic(x, L=1.0, k=1.0, x0=0.0):
 
 
 class TrajectoryProblem:
-    def __init__(self, simulator, bounds, weights=None, time_as_param=False, specify_end=False):
+    def __init__(self, simulator, bounds, weights=None, penalty_config=None, time_as_param=False,
+                 specify_end=False, unique_angle=False):
+
         self.sim = simulator
         self.W = np.diag(weights) if weights else np.identity(len(bounds))
-        self.bounds = bounds # e.g. [(-5, 5), (-10, 10)]
+        self.penalty_config = penalty_config
+        self.bounds = bounds  # e.g. [(-5, 5), (-10, 10)]
         self.time_as_param = time_as_param
         self.specify_end = specify_end
+        self.unique_angle = unique_angle
 
         if self.time_as_param and self.specify_end:
             raise NotImplementedError
 
-    def fitness(self, x):
+    def get_penalties(self, states):
+        penalties = np.zeros(self.W.shape[0])
+
+        if self.penalty_config is None:
+            return penalties
+
+        for i, pen_opt in enumerate(self.penalty_config):
+            if len(pen_opt.keys()) == 0:
+                continue
+            # get base value
+            base = pen_opt['base']
+            if base == 'final':
+                v = states.T[i, -1]
+            elif base == 'max':
+                v = np.max(states.T[i, :])
+            elif base == 'min':
+                v = np.min(states.T[i, :])
+            else:
+                raise NotImplementedError
+
+            # penalty calculation
+            soft = pen_opt.get('soft', True)  # bool!
+            kind = pen_opt['kind']
+
+            L = 100
+            s = 0.001
+
+            value = pen_opt['value']
+            if kind == 'range':
+                if not soft:
+                    penalties[i] = L if (v < value[0]) and (v > value[1]) else 0
+                else:
+                    x1_0 = value[0] * 1.1
+                    k1 = math.log((L / s) - 1) / (0.1 * value[0])
+                    x2_0 = value[1] * 1.1
+                    k2 = math.log((L / s) - 1) / (0.1 * value[1])
+
+                    penalties[i] = logistic(x=v, L=L, k=k2*np.sign(value[1]), x0=x2_0) -\
+                                   logistic(x=v, L=L, k=k1*np.sign(value[0]), x0=x1_0) + L
+            elif kind == 'max':
+                if not soft:
+                    penalties[i] = L if (not soft) and (v > value) else 0
+                else:
+                    x0 = value * 1.1
+                    k = math.log((L / s) - 1) / (0.1 * value)
+                    penalties[i] = logistic(x=v, L=L, k=k, x0=x0)
+            elif kind == 'min':
+                if not soft:
+                    penalties[i] = L if (not soft) and (v < value) else 0
+                else:
+                    x0 = value * 1.1
+                    k = math.log((L / s) - 1) / (0.1 * value)
+                    penalties[i] = logistic(x=v, L=L, k=-k, x0=x0)
+            else:
+                raise NotImplementedError
+
+        return penalties
+
+    def _fitness(self, dv):
         l = len(self.bounds)
         if self.time_as_param:
-            T = x[-1]
+            T = dv[-1]
             l -= 1
         else:
             T = None
 
         end = 0.0
         if self.specify_end:
-            end = x[-1]
+            end = dv[-1]
             l -= 1
 
-        res = self.sim.solve(param=x[0:l], T=T, start_end=(0.0, end))
-        phi = res[0][:, 0]
-        final_state = res[0].T[:, -1]
-        q = final_state[1]
+        states = self.sim.solve(param=dv[0:l], T=T, start_end=(0.0, end))[0]
+        penalties = self.get_penalties(states)
+
+        final_state = states.T[:, -1]
+        if self.unique_angle:
+            final_state[0] %= (2 * np.pi)
 
         # Root Mean Squared Error of the weighted states
         rms = np.sqrt(final_state.T @ self.W @ final_state)
 
-        penalties = np.zeros(self.W.shape[0])
+        self.final_state = final_state
 
-        # penalty for big angles
-        phi_penalty = logistic(x=np.max(np.abs(phi)), L=80, k=8.5, x0=np.pi*0.65)
-        penalties[0] = phi_penalty
+        return [rms + np.sum(penalties)], self.final_state
 
-        # penalty for positions outside [0, 0.8]
-        position_penalty = logistic(x=q, L=80, k=75, x0=0.9) - logistic(x=q, L=80, k=75, x0=-0.1) + 80
-        penalties[1] = position_penalty
-
-        return [rms + np.diagonal(self.W) @ penalties]
+    def fitness(self, dv):
+        return self._fitness(dv)[0]
 
     def get_bounds(self):
         return tuple(zip(*self.bounds))
+
+    def hessians(self, dv):
+        states = self.final_state.tolist()
+        states.append([0,0,0,0,0,0])
+        return [states]
+
 

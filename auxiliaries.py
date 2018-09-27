@@ -18,6 +18,14 @@ def paraboloid(N=2):
 
     return f
 
+def print_state(state):
+    try:
+        print(f"φ={np.rad2deg(state[0]):.4f}°")
+        print(f"q={state[1]}m")
+        print(f"φ.={np.rad2deg(state[2]):.4f}°/s")
+        print(f"q.={state[3]}m/s")
+    except IndexError:
+        pass
 
 def pulse(width, value=1):
     ''' Returns a vector of (width+1) integer ones. '''

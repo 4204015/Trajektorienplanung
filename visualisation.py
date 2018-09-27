@@ -1,5 +1,7 @@
 import time
 import numpy as np
+import matplotlib as mpl
+import matplotlib.axes
 import matplotlib.pyplot as plt
 from matplotlib.ticker import NullFormatter
 from collections import deque
@@ -59,7 +61,7 @@ class Animation:
     """
     Provides animation capabilities.
 
-    Given a callable function that draws an image of the system state and smiulation data
+    Given a callable function that draws an image of the system state and simulation data
     this class provides a method to created an animated representation of the system.
     """
 
@@ -153,9 +155,9 @@ def plot_sim_states(res, size=(12, 12)):
     plt.tight_layout()
 
 
-def plot_sample_distribution_scatter(S, labels=("x", "y"), size=10):
+def plot_sample_distribution_scatter(S, fig=None, labels=("x", "y"), size=10, **kwargs):
     nullfmt = NullFormatter()  # no labels
-    plt.figure(figsize=(size, size))
+    fig = plt.figure(figsize=(size, size)) if not fig else fig
 
     # definitions for the axes
     left, width = 0.1, 0.65
@@ -174,7 +176,7 @@ def plot_sample_distribution_scatter(S, labels=("x", "y"), size=10):
     axHistx.xaxis.set_major_formatter(nullfmt)
     axHisty.yaxis.set_major_formatter(nullfmt)
 
-    axScatter.scatter(*S.T)
+    axScatter.scatter(*S.T, **kwargs)
     axScatter.set_xlabel(labels[0])
     axScatter.set_ylabel(labels[1])
     axScatter.grid(True)
@@ -186,3 +188,39 @@ def plot_sample_distribution_scatter(S, labels=("x", "y"), size=10):
 
     axHistx.set_xlim(axScatter.get_xlim())
     axHisty.set_ylim(axScatter.get_ylim())
+
+
+def plot_phi_error(X, X_test, ax=None, title=None, y_lim=None, outliers=False, reference=None):
+
+    if ax is None:
+        fig = plt.figure(figsize=(6, 8))
+        ax = fig.add_subplot(111)
+
+    AE = np.abs(X - X_test)[:, [0, 2]]
+    MAE = np.mean(AE, axis=0)
+    RMSE = np.sqrt(np.mean((X - X_test)**2, axis=0))[[0, 2]]
+
+    if outliers:
+        ax.boxplot(np.rad2deg(AE))
+    else:
+        ax.boxplot(np.rad2deg(AE), 0, '')
+
+    ax.plot([1, 2], np.rad2deg(MAE), 'x', markersize=10, label='MAE')
+
+    if reference:
+        ax.plot([1, 2], np.rad2deg(reference), 'x', markersize=10, label='MAE_ref', color='r')
+
+    ax.set_xticklabels([r'$\varphi$', r'$\dot{\varphi}$'])
+    ax.set_ylabel("Fehler in ° bzw. °/s")
+    ax.legend()
+    ax.grid()
+
+    if y_lim:
+        ax.set_ylim(y_lim)
+
+    if title:
+        ae_string = "\n" + r"$AE_{\varphi, max}=$" + f"{np.max(np.rad2deg(AE[:, 0])):.3f}   " +\
+                    r"$AE_{\dot{\varphi}, max}=$" + f"{np.max(np.rad2deg(AE[:, 1])):.3f}"
+        mae_string = "\n" + r"$MAE_{\varphi}=$" + f"{np.rad2deg(MAE[0]):.3f}   " + r"$MAE_{\dot{\varphi}}=$" + f"{np.rad2deg(MAE[1]):.3f}"
+        rmse_string = "\n" + r"$RMSE_{\varphi}=$" + f"{np.rad2deg(RMSE[0]):.3f}   " + r"$RMSE_{\dot{\varphi}}=$" + f"{np.rad2deg(RMSE[1]):.3f}"
+        ax.set_title(title + ae_string + mae_string + rmse_string)
