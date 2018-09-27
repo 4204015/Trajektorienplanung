@@ -30,6 +30,7 @@ class PlotterLLM:
         self.fig, self.axes = plt.subplots(nrows=n, ncols=1)
         self.axes = np.array(self.axes).flatten()
         self.sort = sort
+        self.standard_colors = plt.get_cmap('plasma')(np.linspace(0, 0.7, 4))
     
     # --- plot options 2D ---
     
@@ -190,22 +191,22 @@ class PlotterLLM:
         sm.set_array([])
         self.fig.colorbar(sm, ax=ax)
         ax.scatter(self.llm.C[:, self.sort_idx][0, :], self.llm.C[:, self.sort_idx][1, :],
-                   marker='x', color=self.standard_colors[0], label=r"$\c$")
-        ax.legend(loc=4, bbox_to_anchor=(0., 1.0, 1., .102))
+                   marker='x', color=self.standard_colors[0])#, label=r"$\c$")
+        #ax.legend(loc=4, bbox_to_anchor=(0., 1.0, 1., .102))
         ax.set_xlabel("$x_1$")
         ax.set_ylabel("$x_2$")
         
         
     def models3D(self, ax):
         ax.set_title("Teilmodelle")
-        for idx, r in enumerate(self.llm.model_range):
+        for idx, r in enumerate(self.llm.network.model_range):
             r = list(zip(*r))
             ax.add_patch(patches.Rectangle(xy=r[0], width=r[1][0]-r[0][0], height=r[1][1]-r[0][1], fill=False)) 
-        ax.scatter(self.llm.C[:, self.sort_idx][0, :], self.llm.C[:, self.sort_idx][1, :],
-                   marker='x', color=self.standard_colors[0], label=r"$\c$")
+        ax.scatter(self.llm.network.C[:, self.sort_idx][0, :], self.llm.network.C[:, self.sort_idx][1, :],
+                   marker='x', color=self.standard_colors[0])#, label=r"$\c$")
         ax.set_xlabel("$x_1$")
         ax.set_ylabel("$x_2$")
-        ax.legend(loc=4, bbox_to_anchor=(0., 1.0, 1., .102))
+        #ax.legend(loc=4, bbox_to_anchor=(0., 1.0, 1., .102))
     
     def report3D(self, ax):
         self.report(ax)         
@@ -241,7 +242,6 @@ class PlotterLLM:
             self.options = ["report"]
 
         # define colors for each model
-        self.standard_colors = plt.get_cmap('plasma')(np.linspace(0, 0.7, 4))
         self.colors = plt.get_cmap('inferno')(np.linspace(0, 0.7, llm.M))
         
         if self.sort and u.shape[1] <= 1:
